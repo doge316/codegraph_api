@@ -1,0 +1,22 @@
+{
+  "name": "codegraph_api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Repository indexing and source queries through the official CodeGraph SDK",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/contracts.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/contracts.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "scripts": {},
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@colbymchenry/codegraph": "1.6.2"
+  }
+}
