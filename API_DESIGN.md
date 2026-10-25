@@ -13,6 +13,27 @@
 
 所有方法返回 Promise。返回的节点和边保留 SDK 原生结构。完整文件没有对应 file 节点时，`node` 可以为 null。
 
+## HTTP 调用层
+
+通过 `npm start` 在 Node.js 24 上启动 Elysia 与 `@elysia/node` 适配器。默认监听 `127.0.0.1:3000`，可配置 `HOST` 和 `PORT`。服务启动不传仓库路径；保留现有 JS 导出和六个业务方法。
+
+| POST 路径 | JSON 请求体 |
+| --- | --- |
+| `/initialize` | `{ projectRoot, options?: { language } }` |
+| `/sync` | `{ projectRoot }` |
+| `/getAllFunctions` | `{ projectRoot }` |
+| `/getCallees` | `{ projectRoot, key }` |
+| `/getContent` | `{ projectRoot, input }` |
+| `/getLocation` | `{ projectRoot, key }` |
+
+请求使用 `Content-Type: application/json`。`projectRoot` 必须是服务所在机器上的现有仓库绝对路径。`key` 是三元 key，`input` 是三元 key 或文件选择器。初始化支持省略 options，语言参数沿用现有业务规则。
+
+`RepositoryManager.getRepository(projectRoot)` 校验路径、执行 `realpath()`，以真实路径为 Map key 获取或创建实例。所有路由使用同一管理对象，同一仓库复用实例和内存缓存；已有仓库可直接查询，重启服务后首次查询从持久缓存恢复，不要求再调用 initialize。不增加操作队列，使用方安排更新与查询分开进行。
+
+HTTP `200` 直接返回业务结果的 JSON。错误统一为 `{ error: { code, message } }`，参数或 JSON 无效返回 `400`，资源不存在返回 `404`，仓库未初始化、已初始化或节点歧义返回 `409`，其他内部错误返回 `500`。歧义附带 `error.candidates`；建库错误存在原始结果时附带 `error.result`。SDK 当前没有为已初始化/未初始化提供错误码，HTTP 层根据固定 SDK 版本的对应错误消息映射，业务模块不变。
+
+新增代码职责：`server.js` 负责启动与退出，`http-api.js` 负责路由、参数及错误转换，`repository-manager.js` 负责实例复用。HTTP 层没有增加数据库表、节点查询方法或缓存格式，也不负责上传代码文件。
+
 ## 初始化与更新
 
 `initialize()` 只用于尚未建立数据库的目标仓库。通过 `CodeGraph.init(root, { index: false })` 建库，保存语言策略到目标仓库 `.codegraph/repository-api.json`。不限制语言时执行 `cg.indexAll()`；限制语言时发现指定语言文件，执行原生 `cg.sync({ paths })`。全量建库返回失败时抛错，原始结果保存在 `error.result`。

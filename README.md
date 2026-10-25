@@ -12,6 +12,83 @@ cd codegraph_api
 npm ci
 ```
 
+## 启动 HTTP 服务
+
+```bash
+npm start
+```
+
+默认地址为 `http://127.0.0.1:3000`，保持服务进程运行，再从 Python 发起请求。启动时不绑定仓库，每次请求通过 `projectRoot` 指定 **JS 服务所在机器上的仓库绝对路径**，不会上传 Python 所在机器上的文件。需要修改监听设置时，可通过环境变量 `HOST`、`PORT` 配置，例如在 Bash 中执行 `PORT=3001 npm start`。
+
+所有业务接口使用 **POST + JSON**，请求头为 `Content-Type: application/json`，路径与 JS 函数同名：
+
+| 路径 | JSON 请求体 |
+| --- | --- |
+| `/initialize` | `{ "projectRoot": "/path/to/repo", "options": { "language": "python" } }` |
+| `/sync` | `{ "projectRoot": "/path/to/repo" }` |
+| `/getAllFunctions` | `{ "projectRoot": "/path/to/repo" }` |
+| `/getCallees` | `{ "projectRoot": "/path/to/repo", "key": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
+| `/getContent` | `{ "projectRoot": "/path/to/repo", "input": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
+| `/getLocation` | `{ "projectRoot": "/path/to/repo", "key": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
+
+`/initialize` 的 `options` 可省略；`language` 支持字符串、非空字符串数组或 null，含义与 JS 接口一致。读取整个文件时，`/getContent` 的 `input` 改为 `{ "kind": "file", "filePath": "src/worker.py" }`。`filePath` 相对于 `projectRoot`，`startLine` 从 1 开始。
+
+Python 示例（先安装 `requests`：`python -m pip install requests`）：
+
+```python
+import requests
+
+base_url = "http://127.0.0.1:3000"
+project_root = "/absolute/path/to/repository"
+
+def call(method, **parameters):
+    response = requests.post(
+        f"{base_url}/{method}",
+        json={"projectRoot": project_root, **parameters},
+        timeout=300,
+    )
+    response.raise_for_status()
+    return response.json()
+
+# 仅尚未建库的仓库执行一次；已有仓库直接查询。
+# call("initialize", options={"language": "python"})
+
+key = {"name": "run", "filePath": "src/worker.py", "startLine": 8}
+location = call("getLocation", key=key)
+content = call("getContent", input=key)
+functions = call("getAllFunctions")
+print(location)
+
+# 统一更新源码后执行，更新完成再查询，并按新位置填写 key。
+# call("sync")
+```
+
+成功响应为 HTTP `200`，JSON 直接是现有业务方法的返回值；`/getAllFunctions` 返回数组。失败响应统一为：
+
+```json
+{
+  "error": {
+    "code": "NODE_NOT_FOUND",
+    "message": "No node matches the supplied key."
+  }
+}
+```
+
+| HTTP 状态码 | 错误情况 |
+| --- | --- |
+| `400` | JSON 格式错误、缺少参数、无效 key、语言不支持、路径非绝对路径或节点类型不适用 |
+| `404` | 路由、仓库目录、文件或节点不存在，或源码不可用 |
+| `409` | `NOT_INITIALIZED`、`ALREADY_INITIALIZED` 或 `AMBIGUOUS_NODE` |
+| `500` | 其他 SDK、数据库或文件系统错误 |
+
+歧义错误包含 `error.candidates`；索引失败如果带原始结果，会附在 `error.result`。Python 需要查看错误详情时，在 `raise_for_status()` 前读取 `response.json()`。超时会结束客户端等待，不会自动取消服务器正在执行的建库或同步。
+
+服务按真实仓库路径复用实例和内存索引，各仓库独立保存。所有接口都能获取或创建实例，因此服务重启后，已建库仓库可直接查询，无须重新初始化。符号链接别名通过 `realpath()` 统一。缓存与调用关系的处理仍由现有业务模块负责。
+
+不设置操作队列，由使用方统一安排更新，避免初始化或同步期间查询同一仓库。服务默认仅供本机调用，没有增加认证机制。
+
+## 直接使用 JavaScript
+
 `src/index.js` 导出 `CodeGraphRepository` 和 `createRepository()`。应用代码调用工厂创建实现：
 
 ```javascript
@@ -191,6 +268,9 @@ const location = await repository.getLocation({
 | ------------------------------- | ----------------------------------------------------- |
 | `src/contracts.d.ts`          | 编辑器类型声明                                        |
 | `src/index.js`                | 导出实现类和工厂函数                                  |
+| `src/server.js`               | Node HTTP 服务启动、监听配置和退出处理                |
+| `src/http-api.js`             | Elysia 路由、JSON 参数校验和 HTTP 错误响应              |
+| `src/repository-manager.js`   | 仓库路径规范化与实例复用                              |
 | `src/codegraph-repository.js` | 六个业务方法的实现，SDK 生命周期、同步流程与策略保存  |
 | `src/language-scope.js`       | 语言参数校验、文件语言筛选                            |
 | `src/node-cache.js`           | 内部五类符号加载、持久缓存、内存索引与 key 匹配       |

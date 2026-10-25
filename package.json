@@ -12,10 +12,15 @@
       "import": "./src/index.js"
     }
   },
+  "scripts": {
+    "start": "node src/server.js"
+  },
   "engines": {
     "node": ">=24 <25"
   },
   "dependencies": {
-    "@colbymchenry/codegraph": "1.6.2"
+    "@colbymchenry/codegraph": "1.6.2",
+    "@elysia/node": "1.4.6",
+    "elysia": "1.4.30"
   }
 }
