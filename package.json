@@ -12,9 +12,8 @@
       "import": "./src/index.js"
     }
   },
-  "scripts": {},
   "engines": {
-    "node": ">=20"
+    "node": ">=24 <25"
   },
   "dependencies": {
     "@colbymchenry/codegraph": "1.6.2"

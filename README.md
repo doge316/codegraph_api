@@ -1,10 +1,13 @@
 # CodeGraph JavaScript Repository API
 
-基于官方 `@colbymchenry/codegraph@1.6.2` SDK，实现建库、同步、调用查询、源码读取和函数清单五个接口。运行代码为普通 ESM JavaScript。[`src/codegraph-repository.js`](./src/codegraph-repository.js) 是唯一的实现类；[`src/contracts.d.ts`](./src/contracts.d.ts) 提供对应的编辑器类型声明，不需要编译 TypeScript。
+基于官方 `@colbymchenry/codegraph@1.6.2` SDK，实现建库、同步、调用查询、源码读取、函数清单和定义归属六个接口。运行代码为普通 ESM JavaScript。[`src/codegraph-repository.js`](./src/codegraph-repository.js) 实现业务接口；[`src/contracts.d.ts`](./src/contracts.d.ts) 提供对应的编辑器类型声明，不需要编译 TypeScript。
 
 ## 安装和使用
 
+运行环境要求 **Node.js 24.x**，当前已在 Node.js 24.15.0 上验证。SDK 的数据库实现依赖内置 `node:sqlite`，请先确认 Node 版本再安装。
+
 ```bash
+node --version # 应为 v24.x.x
 cd codegraph_api
 npm ci
 ```
@@ -23,16 +26,18 @@ async function main() {
     // 2. 以后修改源码后，调用 SDK 的 sync 更新数据库。
     await repository.sync();
 
-    // 3. 获取所有 function/method 节点，作为查询入口。
+    // 3. 获取所有 function/method 节点（可选，不是查询的前置步骤）。
     const functions = await repository.getAllFunctions();
-    const entry = functions.find(function (node) { return node.name === 'entry'; });
-    const add = functions.find(function (node) { return node.name === 'add'; });
 
-    // 4. 传入入口节点，获取它直接调用的函数/方法。
-    const calls = await repository.getCallees(entry);
+    // 4. 名称、相对路径和行号按实际源码填写；行号从 1 开始。
+    const calls = await repository.getCallees({
+        name: 'entry', filePath: 'service.py', startLine: 4
+    });
 
-    // 5. 传入函数节点读取源码；读整个文件用 { kind: 'file', filePath }。
-    const content = await repository.getContent(add);
+    // 5. 传入 key 读取源码；读整个文件用 { kind: 'file', filePath }。
+    const content = await repository.getContent({
+        name: 'add', filePath: 'service.py', startLine: 1
+    });
 
     return { calls: calls, content: content, functions: functions };
 }
@@ -84,9 +89,9 @@ const result = await repository.sync();
 ## 3. 获取直接调用的函数
 
 ```javascript
-const functions = await repository.getAllFunctions();
-const entry = functions.find(function (node) { return node.name === 'entry'; });
-const result = await repository.getCallees(entry);
+const result = await repository.getCallees({
+    name: 'entry', filePath: 'service.py', startLine: 4
+});
 ```
 
 返回结构：
@@ -108,21 +113,20 @@ const result = await repository.getCallees(entry);
 ## 4. 读取函数、类或整个文件
 
 ```javascript
-const functions = await repository.getAllFunctions();
-const add = functions.find(function (node) { return node.name === 'add'; });
-const functionContent = await repository.getContent(add);
-
-// 类节点需要调用方自行获得（例如通过 SDK 的 getNodesByKind('class')）。
-const classContent = await repository.getContent(classNode);
-
-const methodContent = await repository.getContent(
-    functions.find(function (node) { return node.kind === 'method'; })
-);
+const functionContent = await repository.getContent({
+    name: 'add', filePath: 'service.py', startLine: 1
+});
+const classContent = await repository.getContent({
+    name: 'Worker', filePath: 'service.py', startLine: 7
+});
+const methodContent = await repository.getContent({
+    name: 'run', filePath: 'service.py', startLine: 8
+});
 
 const fileContent = await repository.getContent({ kind: 'file', filePath: 'service.py' });
 ```
 
-符号查询传入完整的原生 `Node`；整个文件查询传 `{ kind: 'file', filePath }`。函数和方法节点可直接从 `getAllFunctions()` 得到。
+符号查询传入 `{ name, filePath, startLine }`，行号按实际索引位置填写；不需要先获得节点或 ID。整个文件查询传 `{ kind: 'file', filePath }`。如果已拥有 `getAllFunctions()` 返回的节点，也可以传入，其三个 key 字段参与匹配，额外字段（包括 `id`）不参与匹配。
 
 返回结构：
 
@@ -134,7 +138,7 @@ const fileContent = await repository.getContent({ kind: 'file', filePath: 'servi
 }
 ```
 
-函数/方法/类使用 `await cg.getCode(id)`，按 SDK 的源码区间读取；整个文件通过文件系统读取完整 UTF-8 内容。返回的 `source` 是本接口组织的字段，不是往原生 Node 上添加的属性。文件路径相对于仓库根目录，不能越出仓库。
+函数/方法/类/结构体/接口使用 `await cg.getCode(id)`，按 SDK 的源码区间读取；整个文件通过文件系统读取完整 UTF-8 内容。返回的 `source` 是本接口组织的字段，不是往原生 Node 上添加的属性。文件路径相对于仓库根目录，不能越出仓库。
 
 ## 5. 获取项目中全部函数
 
@@ -146,13 +150,40 @@ const functions = await repository.getAllFunctions();
 
 这里的“全部”指数据库中的函数和方法节点，包含已入库测试函数；不包含作为其他节点类型表示的实体，也不绕过初始化时选择的语言范围。
 
-## 节点输入与错误
+## 6. 查询函数或方法的定义归属
 
-`getCallees` 和 `getContent` 接收调用方已经拥有的完整原生 `Node`，不再按 `name` / `qualifiedName` / `id` 二次查找。函数和方法节点可从 `getAllFunctions()` 获取；类等其他节点由调用方自行提供。
+```javascript
+const location = await repository.getLocation({
+    name: 'run', filePath: 'src/worker.py', startLine: 8
+});
+// location = { node, filePath, container }
+```
 
-`getCallees` 的入口必须是函数或方法，否则抛 `INVALID_SELECTOR`。`getContent` 接受函数/方法/类/结构体/接口节点，或 `{ kind: 'file', filePath }` 文件选择器；文件路径不能越出仓库。
+`node` 是匹配的完整函数或方法节点，`filePath` 是它在仓库中的相对路径。`container` 是 SDK 包含关系中最近的 class、struct 或 interface 完整节点，未找到时为 `null`。文件级普通函数通常返回 `null`；嵌套类的方法返回最近的所属类，方法内的嵌套函数沿祖先关系查找最近的所属类型。查询表示源码定义归属，不包含继承或调用关系。
 
-无效输入抛 `INVALID_SELECTOR`；源码不可用抛 `SOURCE_NOT_FOUND`。SDK 和文件系统错误直接传播。
+先复用现有内存索引的 `findNode(key)`，再通过 `cg.getAncestors(node.id)` 查询归属，不新增缓存格式或名称索引。SDK 缺少包含关系时也可能返回 `null`，不能据此断言源码中没有所属类型。key 无效或匹配到非函数/方法时抛 `INVALID_SELECTOR`；没有匹配抛 `NODE_NOT_FOUND`；多个匹配抛 `AMBIGUOUS_NODE` 并提供 `error.candidates`。
+
+## 节点 key、缓存与错误
+
+`getCallees` 和符号形式的 `getContent` 接收 `NodeKey`：
+
+```javascript
+{ name: 'entry', filePath: 'src/service.py', startLine: 4 }
+```
+
+名称精确匹配；路径相对于目标仓库根目录，统一分隔符、归一化 `./`；起始行是从 1 开始的整数。不能使用绝对路径或越出仓库。三个字段都必须提供。
+
+内部 `findNode(key)` 查询内存 Map：没有匹配时抛 `NODE_NOT_FOUND`；一个匹配时继续查询；多个匹配时抛 `AMBIGUOUS_NODE`，`error.candidates` 保存候选原生节点，不自动选择第一个。`findNode` 不作为用户接口导出。
+
+`initialize()` 索引完成和 `sync()` 更新完成后，内部 `loadSymbolNodes(cg)` 加载 function、method、class、struct、interface 五类完整节点。`refreshNodeCache(cg)` 将 `{ version: 1, nodes: [...] }` 写入**目标仓库**的 `.codegraph/nodes-cache.json.tmp`，写完后重命名为 `.codegraph/nodes-cache.json` 替换旧文件，再建立内存索引。`getAllFunctions()` 仍只查询函数和方法，不承担缓存加载职责。
+
+新实例首次按 key 查询时读取 JSON 并建立内存索引；缓存缺失、JSON 损坏、结构无效或版本不兼容时，从已有数据库重建，无须重新初始化。后续 key 到节点 ID 的匹配不查询数据库；调用边和源码仍由 SDK 读取。读取整个文件不依赖符号缓存。
+
+更新开始清空当前实例内存；更新或缓存生成抛出异常时删除持久缓存并传播错误，后续查询从数据库重建。成功写入使用临时文件替换，不先删除正式文件。`sync()` 仍返回原生结果；如包含失败文件，缓存反映数据库已有节点，不代表每个源码文件都同步成功。
+
+通过本模块修改索引后使用当前实例查询；其他已加载缓存的实例不会自动感知更新，应重新创建。不要并发更新和查询同一仓库，也不要混用外部 CLI/SDK 修改索引；本实现不检测外部更新或进程突然退出期间留下的旧缓存。
+
+`getCallees` 只接受函数或方法；`getContent` 支持上述五类符号或文件选择器。无效输入或节点类型不适用抛 `INVALID_SELECTOR`；源码不可用抛 `SOURCE_NOT_FOUND`。SDK 和文件系统错误直接传播。
 
 ## 代码职责
 
@@ -160,8 +191,9 @@ const functions = await repository.getAllFunctions();
 | ------------------------------- | ----------------------------------------------------- |
 | `src/contracts.d.ts`          | 编辑器类型声明                                        |
 | `src/index.js`                | 导出实现类和工厂函数                                  |
-| `src/codegraph-repository.js` | 五个公共方法的实现，SDK 生命周期、同步流程与策略保存  |
+| `src/codegraph-repository.js` | 六个业务方法的实现，SDK 生命周期、同步流程与策略保存  |
 | `src/language-scope.js`       | 语言参数校验、文件语言筛选                            |
-| `src/graph-queries.js`        | 调用遍历和内容查询                                    |
+| `src/node-cache.js`           | 内部五类符号加载、持久缓存、内存索引与 key 匹配       |
+| `src/graph-queries.js`        | 调用遍历、内容与定义归属查询                          |
 
-`CodeGraphRepository` 是唯一的实现类，五个公共方法都在其中。调用方通过 `createRepository()` 工厂获得实例，不直接依赖具体实现。若以后更换图引擎，只需替换 `src/` 中的实现。没有依赖旧解析模块，也没有读取或改写 CodeGraph 的内部 SQL 表。
+六个业务方法都在 `CodeGraphRepository` 中。调用方通过 `createRepository()` 工厂获得实例。缓存模块仅供内部使用；没有读取或改写 CodeGraph 的内部 SQL 表。

@@ -6,6 +6,13 @@ export interface FileSelector {
     filePath: string;
 }
 
+/** Exact symbol lookup; paths are project-relative and lines are 1-indexed. */
+export interface NodeKey {
+    name: string;
+    filePath: string;
+    startLine: number;
+}
+
 export interface InitializeOptions {
     /** Omit or pass null for all SDK-supported languages. */
     language?: string | string[] | null;
@@ -25,18 +32,27 @@ export interface ContentResult {
     source: string;
 }
 
+export interface LocationResult {
+    node: Node;
+    filePath: string;
+    /** Nearest enclosing class, struct, or interface recorded by the SDK; null if none is found. */
+    container: Node | null;
+}
+
 export declare class CodeGraphRepository {
     constructor(projectRoot: string);
     /** Create the index; omit options.language to index all supported languages. */
     initialize(options?: InitializeOptions): Promise<IndexResult | SyncResult>;
     /** Uses the SDK's native sync, preserving the language selection. */
     sync(): Promise<SyncResult>;
-    /** node must be a function or method. */
-    getCallees(node: Node): Promise<CallResult>;
-    /** Pass a Node to read a symbol, or a FileSelector to read a whole file. */
-    getContent(node: Node | FileSelector): Promise<ContentResult>;
+    /** The key must identify exactly one function or method. */
+    getCallees(key: NodeKey): Promise<CallResult>;
+    /** Pass a NodeKey to read a symbol, or a FileSelector to read a whole file. */
+    getContent(input: NodeKey | FileSelector): Promise<ContentResult>;
     /** Returns both function and method nodes. */
     getAllFunctions(): Promise<Node[]>;
+    /** Find the file and nearest enclosing type of exactly one function or method. */
+    getLocation(key: NodeKey): Promise<LocationResult>;
 }
 
 export function createRepository(projectRoot: string): CodeGraphRepository;

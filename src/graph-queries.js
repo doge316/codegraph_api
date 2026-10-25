@@ -28,6 +28,16 @@ function compareNodes(left, right) {
         || left.id.localeCompare(right.id);
 }
 
+export function getLocation(cg, node) {
+    if (!isFunction(node)) {
+        throw apiError('INVALID_SELECTOR', 'Location queries accept functions or methods.');
+    }
+    const container = cg.getAncestors(node.id).find((ancestor) =>
+        ancestor.kind === 'class' || ancestor.kind === 'struct' || ancestor.kind === 'interface'
+    ) || null;
+    return { node, filePath: node.filePath, container };
+}
+
 export function getAllFunctions(cg) {
     return cg.getNodesByKind('function').concat(cg.getNodesByKind('method')).sort(compareNodes);
 }
