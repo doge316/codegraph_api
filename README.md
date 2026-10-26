@@ -20,6 +20,17 @@ npm start
 
 默认地址为 `http://127.0.0.1:3000`，保持服务进程运行，再从 Python 发起请求。启动时不绑定仓库，每次请求通过 `projectRoot` 指定 **JS 服务所在机器上的仓库绝对路径**，不会上传 Python 所在机器上的文件。需要修改监听设置时，可通过环境变量 `HOST`、`PORT` 配置，例如在 Bash 中执行 `PORT=3001 npm start`。
 
+### 自动生成的接口文档
+
+启动后访问：
+
+- [交互式接口文档](http://127.0.0.1:3000/doc)：查看六个接口的中文说明、参数示例、成功和错误响应结构，并在页面中填写 JSON 发起请求。
+- [OpenAPI JSON](http://127.0.0.1:3000/doc/json)：获取接口规范，可导入支持 OpenAPI 的客户端工具。
+
+文档通过 `@elysia/openapi` 从路由和请求参数 Schema 自动生成，默认使用 Scalar 页面。页面前端资源默认通过 CDN 加载，浏览器需要能够访问该 CDN。修改 `HOST`、`PORT` 后使用对应服务地址访问文档。
+
+请求示例中的仓库路径、符号名称和行号需要替换为实际值。可先调用 `/getAllFunctions`，直接使用返回的 key 发起后续查询。页面中的初始化和同步会实际修改目标仓库索引。
+
 所有业务接口使用 **POST + JSON**，请求头为 `Content-Type: application/json`，路径与 JS 函数同名：
 
 | 路径 | JSON 请求体 |
@@ -175,15 +186,15 @@ const result = await repository.getCallees({
 
 ```javascript
 {
-    entry: /* 入口的原生 Node 对象 */,
-    functions: [/* 直接调用的 function/method 原生 Node 对象 */],
+    entry: /* 入口的 { name, filePath, startLine } */,
+    functions: [/* 直接调用的 function/method key */],
     edges: [/* 入口的原生 calls Edge 对象 */]
 }
 ```
 
 例如 `entry -> helper -> total -> add`：`functions` 为 `[helper]`，不包含间接调用的 `total`、`add`。
 
-实现取 `cg.getOutgoingEdges(entry.id)` 中的 `calls` 边，返回直接调用目标。保留实际调用边用于还原调用位置，函数结果按节点 ID 去重，并排除入口自己；自递归调用边保留在 `edges` 中。方法之间、函数与方法之间的 `calls` 边使用同一流程。
+实现取 `cg.getOutgoingEdges(node.id)`（内部解析出的节点 ID） 中的 `calls` 边，返回直接调用目标。保留实际调用边用于还原调用位置，函数结果按节点 ID 去重，并排除入口自己；自递归调用边保留在 `edges` 中。方法之间、函数与方法之间的 `calls` 边使用同一流程。
 
 这是**已构建图中的直接调用结果**。CodeGraph 构图漏掉的动态调用、宏调用等不会被补出；未解析到项目节点的外部库函数也无法返回源码节点。
 
@@ -203,7 +214,7 @@ const methodContent = await repository.getContent({
 const fileContent = await repository.getContent({ kind: 'file', filePath: 'service.py' });
 ```
 
-符号查询传入 `{ name, filePath, startLine }`，行号按实际索引位置填写；不需要先获得节点或 ID。整个文件查询传 `{ kind: 'file', filePath }`。如果已拥有 `getAllFunctions()` 返回的节点，也可以传入，其三个 key 字段参与匹配，额外字段（包括 `id`）不参与匹配。
+符号查询传入 `{ name, filePath, startLine }`，行号按实际索引位置填写；不需要先获得节点或 ID。整个文件查询传 `{ kind: 'file', filePath }`。`getAllFunctions()` 返回的 key 可以直接传入。
 
 返回结构：
 
@@ -223,7 +234,7 @@ const fileContent = await repository.getContent({ kind: 'file', filePath: 'servi
 const functions = await repository.getAllFunctions();
 ```
 
-返回 `Node[]`，合并 `cg.getNodesByKind('function')` 和 `cg.getNodesByKind('method')`，按文件、起始行和 ID 排序。保留原生字段，包括 `id`、`name`、`qualifiedName`、`kind`、`filePath`、`language`、`startLine`、`endLine` 等。
+返回 `NodeKey[]`，合并 `cg.getNodesByKind('function')` 和 `cg.getNodesByKind('method')`，按内部节点的文件、起始行和 ID 排序后，每项仅返回 `{ name, filePath, startLine }`。
 
 这里的“全部”指数据库中的函数和方法节点，包含已入库测试函数；不包含作为其他节点类型表示的实体，也不绕过初始化时选择的语言范围。
 
@@ -233,10 +244,10 @@ const functions = await repository.getAllFunctions();
 const location = await repository.getLocation({
     name: 'run', filePath: 'src/worker.py', startLine: 8
 });
-// location = { node, filePath, container }
+// location = { key, filePath, container }
 ```
 
-`node` 是匹配的完整函数或方法节点，`filePath` 是它在仓库中的相对路径。`container` 是 SDK 包含关系中最近的 class、struct 或 interface 完整节点，未找到时为 `null`。文件级普通函数通常返回 `null`；嵌套类的方法返回最近的所属类，方法内的嵌套函数沿祖先关系查找最近的所属类型。查询表示源码定义归属，不包含继承或调用关系。
+`key` 是匹配的函数或方法的三元 key，`filePath` 是它在仓库中的相对路径。`container` 是 SDK 包含关系中最近的 class、struct 或 interface 的三元 key，未找到时为 `null`。文件级普通函数通常返回 `null`；嵌套类的方法返回最近的所属类，方法内的嵌套函数沿祖先关系查找最近的所属类型。查询表示源码定义归属，不包含继承或调用关系。
 
 先复用现有内存索引的 `findNode(key)`，再通过 `cg.getAncestors(node.id)` 查询归属，不新增缓存格式或名称索引。SDK 缺少包含关系时也可能返回 `null`，不能据此断言源码中没有所属类型。key 无效或匹配到非函数/方法时抛 `INVALID_SELECTOR`；没有匹配抛 `NODE_NOT_FOUND`；多个匹配抛 `AMBIGUOUS_NODE` 并提供 `error.candidates`。
 
@@ -270,6 +281,7 @@ const location = await repository.getLocation({
 | `src/index.js`                | 导出实现类和工厂函数                                  |
 | `src/server.js`               | Node HTTP 服务启动、监听配置和退出处理                |
 | `src/http-api.js`             | Elysia 路由、JSON 参数校验和 HTTP 错误响应              |
+| `src/openapi.js`              | 接口文档元数据、SDK 返回结构和错误响应说明             |
 | `src/repository-manager.js`   | 仓库路径规范化与实例复用                              |
 | `src/codegraph-repository.js` | 六个业务方法的实现，SDK 生命周期、同步流程与策略保存  |
 | `src/language-scope.js`       | 语言参数校验、文件语言筛选                            |

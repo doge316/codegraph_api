@@ -22,6 +22,10 @@ function isFunction(node) {
     return node && (node.kind === 'function' || node.kind === 'method');
 }
 
+function toKey(node) {
+    return { name: node.name, filePath: node.filePath, startLine: node.startLine };
+}
+
 function compareNodes(left, right) {
     return left.filePath.localeCompare(right.filePath)
         || left.startLine - right.startLine
@@ -35,11 +39,11 @@ export function getLocation(cg, node) {
     const container = cg.getAncestors(node.id).find((ancestor) =>
         ancestor.kind === 'class' || ancestor.kind === 'struct' || ancestor.kind === 'interface'
     ) || null;
-    return { node, filePath: node.filePath, container };
+    return { key: toKey(node), filePath: node.filePath, container: container ? toKey(container) : null };
 }
 
 export function getAllFunctions(cg) {
-    return cg.getNodesByKind('function').concat(cg.getNodesByKind('method')).sort(compareNodes);
+    return cg.getNodesByKind('function').concat(cg.getNodesByKind('method')).sort(compareNodes).map(toKey);
 }
 
 export function getCallees(cg, node) {
@@ -61,10 +65,10 @@ export function getCallees(cg, node) {
         }
         seen.add(target.id);
         if (isFunction(target)) {
-            functions.push(target);
+            functions.push(toKey(target));
         }
     }
-    return { entry: node, functions: functions, edges: edges };
+    return { entry: toKey(node), functions: functions, edges: edges };
 }
 
 export async function getContent(cg, projectRoot, input) {
