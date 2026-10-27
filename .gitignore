@@ -1,8 +1,6 @@
 node_modules/
 .codegraph/
 coverage/
-<<<<<<< HEAD
-# 本地定位模块设计、开发配置与独立检查，不作为生产依赖。
 /design.md
 /localization.dev.yaml
 /dev/localization/
@@ -13,6 +11,4 @@ __pycache__/
 .pytest_cache/
 /AGENTS.md
 /.env
-=======
 doc/
->>>>>>> 88653670de8468ba5833c54c114b45df19991d5d
