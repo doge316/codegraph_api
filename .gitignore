@@ -1,3 +1,14 @@
 node_modules/
 .codegraph/
 coverage/
+# 本地定位模块设计、开发配置与独立检查，不作为生产依赖。
+/design.md
+/localization.dev.yaml
+/dev/localization/
+/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+/AGENTS.md
+/.env

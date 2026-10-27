@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scopetrans-localization"
+version = "0.1.0"
+description = "ScopeTrans public-test planning and complete source extraction"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv==1.2.4",
+    "tree-sitter==0.26.0",
+    "tree-sitter-java==0.23.5",
+    "tree-sitter-c-sharp==0.23.5",
+    "tree-sitter-cpp==0.23.4",
+    "tree-sitter-rust==0.24.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "PyYAML==6.0.3"]
+
+[tool.setuptools.packages.find]
+include = ["localization*"]
+
+[tool.pytest.ini_options]
+testpaths = ["dev/localization/tests"]
+pythonpath = ["."]
+addopts = "-ra"
