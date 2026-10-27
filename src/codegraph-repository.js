@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import codegraph from '@colbymchenry/codegraph';
 import { normalizeLanguages, collectLanguageFiles } from './language-scope.js';
-import { getCallees, getContent, getAllFunctions, getLocation } from './graph-queries.js';
+import { getCallees, getContent, getAllFunctions, getLocation, getDependencies } from './graph-queries.js';
 import { NodeCache } from './node-cache.js';
 
 const POLICY_PATH = '.codegraph/repository-api.json';
@@ -132,5 +132,39 @@ export class CodeGraphRepository {
 
     async getLocation(key) {
         return this.withGraph(async (cg) => getLocation(cg, await this.#nodeCache.findNode(key, cg)), true);
+    }
+
+    async getDependencies(level, input) {
+        return this.withGraph(async (cg) => {
+            if (level === 'class') {
+                const node = await this.#nodeCache.findNode(input, cg);
+                return getDependencies(cg, node, level);
+            }
+            if (level === 'file') {
+                if (!input || input.kind !== 'file' || typeof input.filePath !== 'string' || !input.filePath.trim()) {
+                    const error = new Error('File dependency queries require { kind: "file", filePath }.');
+                    error.code = 'INVALID_SELECTOR';
+                    throw error;
+                }
+                const filePath = path.posix.normalize(input.filePath.replace(/\\/g, '/'));
+                if (path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath) || filePath === '..' || filePath.startsWith('../')) {
+                    const error = new Error('filePath must stay inside the project root.');
+                    error.code = 'INVALID_SELECTOR';
+                    throw error;
+                }
+                const root = await fs.realpath(this.projectRoot);
+                const absolutePath = await fs.realpath(path.join(root, filePath));
+                const relativePath = path.relative(root, absolutePath);
+                if (relativePath.startsWith('..' + path.sep) || path.isAbsolute(relativePath) || !(await fs.stat(absolutePath)).isFile()) {
+                    const error = new Error('filePath must reference a file inside the project root.');
+                    error.code = 'INVALID_SELECTOR';
+                    throw error;
+                }
+                const nodes = cg.getNodesInFile(filePath);
+                const entry = nodes.find((node) => node.kind === 'file') || { id: filePath, kind: 'file', filePath };
+                return getDependencies(cg, entry, level);
+            }
+            return getDependencies(cg, null, level);
+        }, true);
     }
 }

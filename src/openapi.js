@@ -57,6 +57,11 @@ export const apiDocumentation = {
         CallResult: object({ entry: ref('NodeKey'), functions: array(ref('NodeKey')), edges: array(ref('Edge')) }),
         ContentResult: object({ node: nullable(ref('Node')), filePath: string, source: string }),
         LocationResult: object({ key: ref('NodeKey'), filePath: string, container: nullable(ref('NodeKey')) }),
+        FileSelector: object({ kind: { type: 'string', enum: ['file'] }, filePath: string }),
+        DependencyResult: object({
+            entry: { anyOf: [ref('NodeKey'), ref('FileSelector')] },
+            dependencies: { type: 'array', items: { anyOf: [ref('NodeKey'), ref('FileSelector')] } }
+        }),
         ErrorResponse: object({ error: object({
             code: string, message: string, candidates: array(ref('Node')),
             result: { type: 'object', additionalProperties: true }
@@ -83,5 +88,6 @@ export const resultSchema = {
     getAllFunctions: array(ref('NodeKey')),
     getCallees: ref('CallResult'),
     getContent: ref('ContentResult'),
-    getLocation: ref('LocationResult')
+    getLocation: ref('LocationResult'),
+    getDependencies: ref('DependencyResult')
 };

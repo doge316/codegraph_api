@@ -39,6 +39,11 @@ export interface LocationResult {
     container: NodeKey | null;
 }
 
+export interface DependencyResult<TEntry, TDependency> {
+    entry: TEntry;
+    dependencies: TDependency[];
+}
+
 export declare class CodeGraphRepository {
     constructor(projectRoot: string);
     /** Create the index; omit options.language to index all supported languages. */
@@ -53,6 +58,9 @@ export declare class CodeGraphRepository {
     getAllFunctions(): Promise<NodeKey[]>;
     /** Find the file and nearest enclosing type of exactly one function or method. */
     getLocation(key: NodeKey): Promise<LocationResult>;
+    /** Return direct class-to-class or file-to-file dependencies, deduplicated by target. */
+    getDependencies(level: 'class', input: NodeKey): Promise<DependencyResult<NodeKey, NodeKey>>;
+    getDependencies(level: 'file', input: FileSelector): Promise<DependencyResult<FileSelector, FileSelector>>;
 }
 
 export function createRepository(projectRoot: string): CodeGraphRepository;

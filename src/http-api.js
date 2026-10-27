@@ -14,6 +14,7 @@ const nodeKey = t.Object({
 });
 const rootBody = t.Object({ projectRoot });
 const keyBody = t.Object({ projectRoot, key: nodeKey });
+const fileSelector = t.Object({ kind: t.Literal('file'), filePath: t.String({ minLength: 1, description: '仓库内文件的相对路径', examples: ['src/worker.py'] }) });
 
 function errorResponse(code, error) {
     if (code === 'VALIDATION' || code === 'PARSE') {
@@ -46,7 +47,7 @@ function errorResponse(code, error) {
     return { status, body: { error: detail } };
 }
 
-/** HTTP adapter for the existing six business methods. */
+/** HTTP adapter for repository operations. */
 export function createHttpApi() {
     const manager = new RepositoryManager();
     return new Elysia({ adapter: node() })
@@ -96,5 +97,13 @@ export function createHttpApi() {
         .post('/getLocation', async ({ body }) => {
             const repository = await manager.getRepository(body.projectRoot);
             return repository.getLocation(body.key);
-        }, { body: keyBody, detail: routeDocumentation('getLocation', '查询函数或方法的位置', '返回函数或方法的 key、相对文件路径及 SDK 记录的最近所属 class、struct 或 interface 的 key；无所属类型时 container 为 null。', resultSchema.getLocation) });
+        }, { body: keyBody, detail: routeDocumentation('getLocation', '查询函数或方法的位置', '返回函数或方法的 key、相对文件路径及 SDK 记录的最近所属 class、struct 或 interface 的 key；无所属类型时 container 为 null。', resultSchema.getLocation) })
+        .post('/getDependencies', async ({ body }) => {
+            const repository = await manager.getRepository(body.projectRoot);
+            return repository.getDependencies(body.level, body.input);
+        }, { body: t.Object({
+            projectRoot,
+            level: t.Union([t.Literal('class'), t.Literal('file')], { description: '依赖聚合层级' }),
+            input: t.Union([nodeKey, fileSelector])
+        }), detail: routeDocumentation('getDependencies', '查询 class 或 file 依赖', '查询直接依赖并按目标去重。class 支持 calls、extends、implements、instantiates；file 还包含 imports。class 目标和文件目标分别返回三元 key 与文件选择器。', resultSchema.getDependencies) });
 }

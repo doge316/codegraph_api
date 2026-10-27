@@ -1,6 +1,6 @@
 # CodeGraph JavaScript Repository API
 
-基于官方 `@colbymchenry/codegraph@1.6.2` SDK，实现建库、同步、调用查询、源码读取、函数清单和定义归属六个接口。运行代码为普通 ESM JavaScript。[`src/codegraph-repository.js`](./src/codegraph-repository.js) 实现业务接口；[`src/contracts.d.ts`](./src/contracts.d.ts) 提供对应的编辑器类型声明，不需要编译 TypeScript。
+基于官方 `@colbymchenry/codegraph@1.6.2` SDK，实现建库、同步、调用查询、源码读取、函数清单、定义归属和依赖查询。运行代码为普通 ESM JavaScript。[`src/codegraph-repository.js`](./src/codegraph-repository.js) 实现业务接口；[`src/contracts.d.ts`](./src/contracts.d.ts) 提供对应的编辑器类型声明，不需要编译 TypeScript。
 
 ## 安装和使用
 
@@ -24,7 +24,7 @@ npm start
 
 启动后访问：
 
-- [交互式接口文档](http://127.0.0.1:3000/doc)：查看六个接口的中文说明、参数示例、成功和错误响应结构，并在页面中填写 JSON 发起请求。
+- [交互式接口文档](http://127.0.0.1:3000/doc)：查看接口的中文说明、参数示例、成功和错误响应结构，并在页面中填写 JSON 发起请求。
 - [OpenAPI JSON](http://127.0.0.1:3000/doc/json)：获取接口规范，可导入支持 OpenAPI 的客户端工具。
 
 文档通过 `@elysia/openapi` 从路由和请求参数 Schema 自动生成，默认使用 Scalar 页面。页面前端资源默认通过 CDN 加载，浏览器需要能够访问该 CDN。修改 `HOST`、`PORT` 后使用对应服务地址访问文档。
@@ -41,6 +41,7 @@ npm start
 | `/getCallees` | `{ "projectRoot": "/path/to/repo", "key": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
 | `/getContent` | `{ "projectRoot": "/path/to/repo", "input": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
 | `/getLocation` | `{ "projectRoot": "/path/to/repo", "key": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
+| `/getDependencies` | `{ "projectRoot": "/path/to/repo", "level": "class", "input": { "name": "Worker", "filePath": "src/worker.py", "startLine": 1 } }` |
 
 `/initialize` 的 `options` 可省略；`language` 支持字符串、非空字符串数组或 null，含义与 JS 接口一致。读取整个文件时，`/getContent` 的 `input` 改为 `{ "kind": "file", "filePath": "src/worker.py" }`。`filePath` 相对于 `projectRoot`，`startLine` 从 1 开始。
 
@@ -97,6 +98,25 @@ print(location)
 服务按真实仓库路径复用实例和内存索引，各仓库独立保存。所有接口都能获取或创建实例，因此服务重启后，已建库仓库可直接查询，无须重新初始化。符号链接别名通过 `realpath()` 统一。缓存与调用关系的处理仍由现有业务模块负责。
 
 不设置操作队列，由使用方统一安排更新，避免初始化或同步期间查询同一仓库。服务默认仅供本机调用，没有增加认证机制。
+
+### 查询 class / file 依赖
+
+`/getDependencies` 支持 `level: "class"` 和 `level: "file"`。class 输入使用 `{ name, filePath, startLine }`，file 输入使用 `{ kind: "file", filePath }`：
+
+```python
+class_dependencies = call(
+    "getDependencies",
+    level="class",
+    input={"name": "Worker", "filePath": "src/worker.py", "startLine": 1},
+)
+file_dependencies = call(
+    "getDependencies",
+    level="file",
+    input={"kind": "file", "filePath": "src/worker.py"},
+)
+```
+
+返回 `{ entry, dependencies }`，dependencies 只列唯一目标，不返回关系种类或数量。class 层聚合 `calls`、`extends`、`implements`、`instantiates`，将成员间关系提升到最近所属的 class、struct 或 interface，并排除自身依赖。file 层按文件路径聚合上述符号关系，并包含 `imports`，排除同文件关系。class 目标是三元 key；file 目标是 `{ kind: "file", filePath }`。结果只表示 SDK 索引中可解析的直接关系，不推导传递依赖。
 
 ## 直接使用 JavaScript
 
@@ -283,9 +303,9 @@ const location = await repository.getLocation({
 | `src/http-api.js`             | Elysia 路由、JSON 参数校验和 HTTP 错误响应              |
 | `src/openapi.js`              | 接口文档元数据、SDK 返回结构和错误响应说明             |
 | `src/repository-manager.js`   | 仓库路径规范化与实例复用                              |
-| `src/codegraph-repository.js` | 六个业务方法的实现，SDK 生命周期、同步流程与策略保存  |
+| `src/codegraph-repository.js` | 业务方法的实现，SDK 生命周期、同步流程与策略保存  |
 | `src/language-scope.js`       | 语言参数校验、文件语言筛选                            |
 | `src/node-cache.js`           | 内部五类符号加载、持久缓存、内存索引与 key 匹配       |
 | `src/graph-queries.js`        | 调用遍历、内容与定义归属查询                          |
 
-六个业务方法都在 `CodeGraphRepository` 中。调用方通过 `createRepository()` 工厂获得实例。缓存模块仅供内部使用；没有读取或改写 CodeGraph 的内部 SQL 表。
+业务方法都在 `CodeGraphRepository` 中。调用方通过 `createRepository()` 工厂获得实例。缓存模块仅供内部使用；没有读取或改写 CodeGraph 的内部 SQL 表。

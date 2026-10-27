@@ -1,6 +1,6 @@
 # 接口设计与实现
 
-## 六个业务函数
+## 业务函数
 
 | 方法 | 输入 | 输出与职责 |
 | --- | --- | --- |
@@ -10,6 +10,7 @@
 | `getContent(input)` | 同上，或 `{ kind: 'file', filePath }` | 返回 `{ node, filePath, source }` |
 | `getAllFunctions()` | 无 | 返回函数和方法的 NodeKey 数组 |
 | `getLocation(key)` | `{ name, filePath, startLine }` | 返回 `{ key, filePath, container }`，查询函数或方法的定义归属 |
+| `getDependencies(level, input)` | class: `NodeKey`；file: `FileSelector` | 返回 `{ entry, dependencies }`，按目标去重的直接 class/file 依赖 |
 
 所有方法返回 Promise。`getAllFunctions`、`getCallees`、`getLocation` 的符号返回值使用三元 key；调用边仍保留 SDK 原生结构，边的 source/target 仍为内部节点 ID。`getContent` 返回原生节点，完整文件没有对应 file 节点时，`node` 可以为 null。
 
@@ -17,7 +18,7 @@
 
 接口文档由 `@elysia/openapi` 自动生成：`GET /doc` 提供 Scalar 交互页面，`GET /doc/json` 提供 OpenAPI JSON。请求结构来自路由的 Elysia Schema，字段包含中文说明及示例；路由 `detail` 补充中文功能说明、分组和状态码。`src/openapi.js` 集中定义文档信息及 SDK 响应结构，通过 OpenAPI 元数据展示，不改变业务响应校验或返回内容。SDK 节点和索引结果允许额外字段，保留原生返回结构。
 
-通过 `npm start` 在 Node.js 24 上启动 Elysia 与 `@elysia/node` 适配器。默认监听 `127.0.0.1:3000`，可配置 `HOST` 和 `PORT`。服务启动不传仓库路径；保留现有 JS 导出和六个业务方法。
+通过 `npm start` 在 Node.js 24 上启动 Elysia 与 `@elysia/node` 适配器。默认监听 `127.0.0.1:3000`，可配置 `HOST` 和 `PORT`。服务启动不传仓库路径；保留现有 JS 导出。
 
 | POST 路径 | JSON 请求体 |
 | --- | --- |
@@ -27,6 +28,7 @@
 | `/getCallees` | `{ projectRoot, key }` |
 | `/getContent` | `{ projectRoot, input }` |
 | `/getLocation` | `{ projectRoot, key }` |
+| `/getDependencies` | `{ projectRoot, level, input }` |
 
 请求使用 `Content-Type: application/json`。`projectRoot` 必须是服务所在机器上的现有仓库绝对路径。`key` 是三元 key，`input` 是三元 key 或文件选择器。初始化支持省略 options，语言参数沿用现有业务规则。
 
@@ -70,6 +72,8 @@ HTTP `200` 直接返回业务结果的 JSON。错误统一为 `{ error: { code, 
 `getAllFunctions()` 仍合并 function 和 method，按文件、起始行、ID 排序后投影为三元 key，不负责初始化缓存。
 
 `getLocation(key)` 复用 `findNode(key)` 并校验节点为 function 或 method。文件直接取 `node.filePath`；通过 `cg.getAncestors(node.id)` 按从近到远的顺序查找首个 class、struct 或 interface，作为 `container`。返回 `{ key, filePath, container }`，key 和非空 container 均为三元 key，不增加名称索引或变更缓存格式。嵌套类选择最近的所属类型，方法内的嵌套函数沿祖先关系查找所属类型。未找到时 `container` 为 null，包括文件级函数或 SDK 未记录完整包含关系的情况；不据此推断源码中一定没有所属类。不存在和歧义错误沿用现有 key 查询规则。
+
+`getDependencies(level, input)` 只返回 `{ entry, dependencies }`，dependencies 按目标去重，不返回边种类或数量。class 层输入必须唯一匹配 class、struct 或 interface，扫描 SDK 可解析边并将符号端点映射到自身或最近所属类型，聚合 `calls`、`extends`、`implements`、`instantiates`，排除同类型依赖。file 层要求仓库内存在的文件选择器，按 `filePath` 聚合 `imports` 及上述符号关系，排除同文件关系。class 目标为 NodeKey，file 目标为 FileSelector。只返回直接关系，不计算传递依赖；关系缺失时结果为空数组。
 
 无效输入或类型不适用抛 `INVALID_SELECTOR`；源码不可用抛 `SOURCE_NOT_FOUND`。SDK 和文件系统错误直接传播。
 

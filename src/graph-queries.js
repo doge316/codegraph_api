@@ -26,6 +26,64 @@ function toKey(node) {
     return { name: node.name, filePath: node.filePath, startLine: node.startLine };
 }
 
+const TYPE_KINDS = new Set(['class', 'struct', 'interface']);
+const CLASS_RELATIONS = ['calls', 'extends', 'implements', 'instantiates'];
+const FILE_RELATIONS = [...CLASS_RELATIONS, 'imports'];
+
+function nearestType(cg, node) {
+    if (TYPE_KINDS.has(node.kind)) return node;
+    return cg.getAncestors(node.id).find((ancestor) => TYPE_KINDS.has(ancestor.kind)) || null;
+}
+
+export function getDependencies(cg, entry, level) {
+    if (!['class', 'file'].includes(level)) {
+        throw apiError('INVALID_SELECTOR', 'level must be class or file.');
+    }
+
+    if (level === 'class' && !TYPE_KINDS.has(entry.kind)) {
+        throw apiError('INVALID_SELECTOR', 'Class dependency queries require a class, struct, or interface key.');
+    }
+    if (level === 'file' && entry.kind !== 'file') {
+        throw apiError('INVALID_SELECTOR', 'File dependency queries require a file selector.');
+    }
+
+    const nodes = cg.getNodesInFile(entry.filePath);
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const edges = cg.getOutgoingEdgesFrom(nodes.map((node) => node.id),
+        level === 'class' ? CLASS_RELATIONS : FILE_RELATIONS);
+    const targets = new Map();
+    const typeByNode = new Map();
+    const getType = (node) => {
+        if (!typeByNode.has(node.id)) typeByNode.set(node.id, nearestType(cg, node));
+        return typeByNode.get(node.id);
+    };
+
+    for (const edge of edges) {
+        const source = byId.get(edge.source);
+        const target = cg.getNode(edge.target);
+        if (!source || !target) continue;
+
+        const sourceGroup = level === 'class' ? getType(source)?.id : source.filePath;
+        if (sourceGroup !== (level === 'class' ? entry.id : entry.filePath)) continue;
+
+        const targetGroup = level === 'class' ? getType(target) : target;
+        if (!targetGroup) continue;
+        if (level === 'file' && (typeof targetGroup.filePath !== 'string' || !targetGroup.filePath)) continue;
+        const targetIdentity = level === 'class' ? targetGroup.id : targetGroup.filePath;
+        if (targetIdentity === (level === 'class' ? entry.id : entry.filePath)) continue;
+        if (!targets.has(targetIdentity)) {
+            targets.set(targetIdentity, level === 'class'
+                ? toKey(targetGroup)
+                : { kind: 'file', filePath: targetGroup.filePath });
+        }
+    }
+
+    const resultEntry = level === 'class'
+        ? toKey(entry)
+        : { kind: 'file', filePath: entry.filePath };
+    return { entry: resultEntry, dependencies: [...targets.values()] };
+}
+
 function compareNodes(left, right) {
     return left.filePath.localeCompare(right.filePath)
         || left.startLine - right.startLine
