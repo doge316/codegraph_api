@@ -19,9 +19,9 @@ export interface InitializeOptions {
 }
 
 export interface CallResult {
-    entry: Node;
+    entry: NodeKey;
     /** Direct callees only (functions/methods), excluding entry; each appears once. */
-    functions: Node[];
+    functions: NodeKey[];
     /** Direct calls edges, including self-recursive calls. */
     edges: Edge[];
 }
@@ -33,10 +33,15 @@ export interface ContentResult {
 }
 
 export interface LocationResult {
-    node: Node;
+    key: NodeKey;
     filePath: string;
     /** Nearest enclosing class, struct, or interface recorded by the SDK; null if none is found. */
-    container: Node | null;
+    container: NodeKey | null;
+}
+
+export interface DependencyResult<TEntry, TDependency> {
+    entry: TEntry;
+    dependencies: TDependency[];
 }
 
 export declare class CodeGraphRepository {
@@ -49,10 +54,13 @@ export declare class CodeGraphRepository {
     getCallees(key: NodeKey): Promise<CallResult>;
     /** Pass a NodeKey to read a symbol, or a FileSelector to read a whole file. */
     getContent(input: NodeKey | FileSelector): Promise<ContentResult>;
-    /** Returns both function and method nodes. */
-    getAllFunctions(): Promise<Node[]>;
+    /** Returns keys for both functions and methods. */
+    getAllFunctions(): Promise<NodeKey[]>;
     /** Find the file and nearest enclosing type of exactly one function or method. */
     getLocation(key: NodeKey): Promise<LocationResult>;
+    /** Return direct class-to-class or file-to-file dependencies, deduplicated by target. */
+    getDependencies(level: 'class', input: NodeKey): Promise<DependencyResult<NodeKey, NodeKey>>;
+    getDependencies(level: 'file', input: FileSelector): Promise<DependencyResult<FileSelector, FileSelector>>;
 }
 
 export function createRepository(projectRoot: string): CodeGraphRepository;
