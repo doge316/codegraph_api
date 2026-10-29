@@ -42,6 +42,8 @@ npm start
 | `/getContent` | `{ "projectRoot": "/path/to/repo", "input": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
 | `/getLocation` | `{ "projectRoot": "/path/to/repo", "key": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
 | `/getDependencies` | `{ "projectRoot": "/path/to/repo", "level": "class", "input": { "name": "Worker", "filePath": "src/worker.py", "startLine": 1 } }` |
+| `/getSourceUnit` | `{ "projectRoot": "/path/to/repo", "input": { "name": "run", "filePath": "src/worker.py", "startLine": 8 } }` |
+| `/getTestAnalysis` | `{ "projectRoot": "/path/to/public_tests" }` |
 
 `/initialize` 的 `options` 可省略；`language` 支持字符串、非空字符串数组或 null，含义与 JS 接口一致。读取整个文件时，`/getContent` 的 `input` 改为 `{ "kind": "file", "filePath": "src/worker.py" }`。`filePath` 相对于 `projectRoot`，`startLine` 从 1 开始。
 
@@ -119,6 +121,36 @@ file_dependencies = call(
 返回 `{ entry, dependencies }`，dependencies 只列唯一目标，不返回关系种类或数量。class 层聚合 `calls`、`extends`、`implements`、`instantiates`，将成员间关系提升到最近所属的 class、struct 或 interface，并排除自身依赖。file 层按文件路径聚合上述符号关系，并包含 `imports`，排除同文件关系。class 目标是三元 key；file 目标是 `{ kind: "file", filePath }`。结果只表示 SDK 索引中可解析的直接关系，不推导传递依赖。
 
 ## 直接使用 JavaScript
+
+### CodeGraph 基础分析接口
+
+完整能力边界、字段含义及测试组装限制见 [分析接口边界说明](./ANALYSIS_BOUNDARIES.md)。
+
+`getSourceUnit` 和 `getTestAnalysis` 只使用已有 CodeGraph 索引，不增加语言解析器，也不会导入或执行测试。目标目录需要先 `initialize`；源码变动后先 `sync`。`getContent` 保留原有接口与返回结构。
+
+```javascript
+const repository = createRepository('/absolute/path/to/project');
+const unit = await repository.getSourceUnit({
+    name: 'run', filePath: 'src/worker.py', startLine: 8
+});
+const fileUnit = await repository.getSourceUnit({ kind: 'file', filePath: 'src/worker.py' });
+
+const tests = createRepository('/absolute/path/to/public_tests');
+// 测试目录需单独建库；已有库不要重复 initialize。
+const analysis = await tests.getTestAnalysis();
+```
+
+`getSourceUnit` 返回 `{ entry, contents, dependencies, warnings }`。HTTP 使用 `input`，也兼容需求示例中的 `key` 字段。符号可为索引中有三元 key 的函数、方法、类型、常量等。当前为保留导入、装饰器和全局声明，`contents` 保守返回完整所在文件，可能包含无关代码；依赖也按该文件中图上已解析的直接关系提取。同文件符号已被源码覆盖，不再列为依赖。外部符号依赖可以继续用 key 查询，但不自动合并 C++ 类外实现或 partial。
+
+`getTestAnalysis` 返回 `{ cases, warnings }`。每项 case 为 `{ entry, interfaces, dependencies, contents, facts, warnings }`：
+
+- entry 是一个测试候选 key，按名称 `test_…`、`testX…`、`test` 或 Test/Fact 等装饰器识别，并非框架正式收集结果。
+- interfaces 是入口图中直接 calls/instantiates 指向的候选被测接口名称。测试文件、tests/helper/fixture 路径中的实体启发式视为辅助实体；可能误分类，warnings 会声明限制。
+- dependencies 是已解析辅助依赖的递归闭包，以 key 去重；contents 保留测试和这些辅助实体所在文件全文，不保证可以直接独立运行。
+- facts 仅记录 SDK 已有边：`kind`、`owner`、`target`、`consumer`、`filePath`，边有行号时才返回 `startLine`。不会伪造 producer、argumentIndex、接收者或表达式 endLine。
+- warnings 是原因字符串数组。隐式 fixture、autouse、参数化、对象来源和传参分析尚不支持，不能把空依赖列表解释为没有这些依赖。顶层 warnings 还说明测试发现的覆盖限制，包括没有发现候选的情况。
+
+两接口返回的 `contents` 均使用现有 `{ node, filePath, source }` 结构，全文没有 SDK file 节点时 node 为 null。路径以本次 projectRoot 为基准。跨文件符号与未解析目标不能保证完整；检查 warnings 后再决定是否用于自动组装。
 
 `src/index.js` 导出 `CodeGraphRepository` 和 `createRepository()`。应用代码调用工厂创建实现：
 

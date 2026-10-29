@@ -98,6 +98,17 @@ export function createHttpApi() {
             const repository = await manager.getRepository(body.projectRoot);
             return repository.getLocation(body.key);
         }, { body: keyBody, detail: routeDocumentation('getLocation', '查询函数或方法的位置', '返回函数或方法的 key、相对文件路径及 SDK 记录的最近所属 class、struct 或 interface 的 key；无所属类型时 container 为 null。', resultSchema.getLocation) })
+        .post('/getSourceUnit', async ({ body }) => {
+            const repository = await manager.getRepository(body.projectRoot);
+            return repository.getSourceUnit(body.input ?? body.key);
+        }, { body: t.Union([
+            t.Object({ projectRoot, input: t.Union([nodeKey, fileSelector]) }),
+            t.Object({ projectRoot, key: nodeKey })
+        ]), detail: routeDocumentation('getSourceUnit', '提取源码单元（CodeGraph 基础版）', '需要已初始化索引。input 接受符号 key 或文件选择器，也兼容 key 字段。保守返回完整所在文件及文件级已解析直接依赖；跨文件实现和上下文完整性见 warnings。getContent 保留原行为。', resultSchema.getSourceUnit) })
+        .post('/getTestAnalysis', async ({ body }) => {
+            const repository = await manager.getRepository(body.projectRoot);
+            return repository.getTestAnalysis();
+        }, { body: rootBody, detail: routeDocumentation('getTestAnalysis', '分析公有测试（CodeGraph 基础版）', 'projectRoot 为已建索引的公有测试目录。按名称或装饰器识别测试候选，返回已解析显式依赖和图关系事实。无法确认隐式 fixture、对象来源及传参，warnings 为原因字符串数组。', resultSchema.getTestAnalysis) })
         .post('/getDependencies', async ({ body }) => {
             const repository = await manager.getRepository(body.projectRoot);
             return repository.getDependencies(body.level, body.input);
