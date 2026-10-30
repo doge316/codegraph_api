@@ -4,6 +4,7 @@ import codegraph from '@colbymchenry/codegraph';
 import { normalizeLanguages, collectLanguageFiles } from './language-scope.js';
 import { getCallees, getContent, getAllFunctions, getLocation, getDependencies } from './graph-queries.js';
 import { NodeCache } from './node-cache.js';
+import { getSourceUnit, getTestAnalysis } from './analysis-queries.js';
 
 const POLICY_PATH = '.codegraph/repository-api.json';
 
@@ -132,6 +133,14 @@ export class CodeGraphRepository {
 
     async getLocation(key) {
         return this.withGraph(async (cg) => getLocation(cg, await this.#nodeCache.findNode(key, cg)), true);
+    }
+
+    async getSourceUnit(input) {
+        return this.withGraph(cg => getSourceUnit(cg, this.projectRoot, input), true);
+    }
+
+    async getTestAnalysis() {
+        return this.withGraph(cg => getTestAnalysis(cg, this.projectRoot), true);
     }
 
     async getDependencies(level, input) {

@@ -11,6 +11,8 @@
 | `getAllFunctions()` | 无 | 返回函数和方法的 NodeKey 数组 |
 | `getLocation(key)` | `{ name, filePath, startLine }` | 返回 `{ key, filePath, container }`，查询函数或方法的定义归属 |
 | `getDependencies(level, input)` | class: `NodeKey`；file: `FileSelector` | 返回 `{ entry, dependencies }`，按目标去重的直接 class/file 依赖 |
+| `getSourceUnit(input)` | `NodeKey` 或 `FileSelector` | CodeGraph 基础版：完整文件上下文及已解析文件级直接符号依赖 |
+| `getTestAnalysis()` | 无 | CodeGraph 基础版：测试候选、显式辅助依赖闭包及图关系事实 |
 
 所有方法返回 Promise。`getAllFunctions`、`getCallees`、`getLocation` 的符号返回值使用三元 key；调用边仍保留 SDK 原生结构，边的 source/target 仍为内部节点 ID。`getContent` 返回原生节点，完整文件没有对应 file 节点时，`node` 可以为 null。
 
@@ -29,6 +31,8 @@
 | `/getContent` | `{ projectRoot, input }` |
 | `/getLocation` | `{ projectRoot, key }` |
 | `/getDependencies` | `{ projectRoot, level, input }` |
+| `/getSourceUnit` | `{ projectRoot, input }`，兼容 `{ projectRoot, key }` |
+| `/getTestAnalysis` | `{ projectRoot }`，projectRoot 为公有测试目录 |
 
 请求使用 `Content-Type: application/json`。`projectRoot` 必须是服务所在机器上的现有仓库绝对路径。`key` 是三元 key，`input` 是三元 key 或文件选择器。初始化支持省略 options，语言参数沿用现有业务规则。
 
@@ -39,6 +43,21 @@ HTTP `200` 直接返回业务结果的 JSON。错误统一为 `{ error: { code, 
 新增代码职责：`server.js` 负责启动与退出，`http-api.js` 负责路由、参数及错误转换，`repository-manager.js` 负责实例复用。HTTP 层没有增加数据库表、节点查询方法或缓存格式，也不负责上传代码文件。
 
 ## 初始化与更新
+
+新增分析接口复用 `withGraph(..., true)`，要求目录已初始化，读取当前索引，不触发初始化、同步或测试执行。源码变动后先同步。只使用 CodeGraph SDK 和文件读取，不引入语言解析或框架收集依赖。
+
+## 基础分析接口的实际边界
+
+详细边界与反例见 [分析接口边界说明](./ANALYSIS_BOUNDARIES.md)。
+
+`src/analysis-queries.js` 实现两个基础接口。与完整需求的差异通过返回的字符串 warnings 明确说明：
+
+- getSourceUnit 按 key 精确查找 SDK 节点，支持五类缓存之外的常量、别名等索引实体；同 key 多匹配返回 AMBIGUOUS_NODE。为保留上下文返回完整所在文件（含其他声明），不假定 SDK 能补齐跨文件实现。dependencies 是该文件中 calls/extends/implements/instantiates/references/type_of/returns/imports 已解析边的外部符号目标，按 key 去重；同文件实体已覆盖，file 目标没有可继续提取的符号 key 时提示。
+- getTestAnalysis 按函数/方法节点名称及 SDK decorators 识别候选，不执行 pytest 收集。辅助实体按测试文件及 test/helper/fixture 路径启发式分类，从入口求已解析关系闭包并防止循环。interfaces 仅记录入口直接 calls/instantiates 指向的非辅助实体名称，分类不是已确认的业务身份。
+- 每个 case 的 contents 保留入口及已解析辅助实体所在文件全文。facts 使用图边 kind、owner key、target key 或 null、consumer 名称、filePath；仅当 SDK 边提供有效 line 时返回 startLine，不从函数定义行伪造调用位置。缺少对象数据流，不输出 producer/传参位置/endLine 等推断字段。
+- warnings 始终包含覆盖限制；全局没有识别到测试也返回提示。未解析边目标增加具体警告。fixture 注入、autouse、参数化、类外实现和 partial 完整性均未实现。此版本不能等同于《需求补充.md》的完整分析方案。
+
+## 初始化与更新流程
 
 `initialize()` 只用于尚未建立数据库的目标仓库。通过 `CodeGraph.init(root, { index: false })` 建库，保存语言策略到目标仓库 `.codegraph/repository-api.json`。不限制语言时执行 `cg.indexAll()`；限制语言时发现指定语言文件，执行原生 `cg.sync({ paths })`。全量建库返回失败时抛错，原始结果保存在 `error.result`。
 

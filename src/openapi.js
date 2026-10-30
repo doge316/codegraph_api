@@ -56,6 +56,19 @@ export const apiDocumentation = {
         }),
         CallResult: object({ entry: ref('NodeKey'), functions: array(ref('NodeKey')), edges: array(ref('Edge')) }),
         ContentResult: object({ node: nullable(ref('Node')), filePath: string, source: string }),
+        SourceUnitResult: object({
+            entry: { anyOf: [ref('NodeKey'), ref('FileSelector')] },
+            contents: array(ref('ContentResult')), dependencies: array(ref('NodeKey')), warnings: array(string)
+        }),
+        TestGraphFact: object({
+            kind: string, owner: ref('NodeKey'), target: nullable(ref('NodeKey')),
+            consumer: string, filePath: string, startLine: integer
+        }, ['kind', 'owner', 'target', 'consumer', 'filePath']),
+        TestCaseAnalysis: object({
+            entry: ref('NodeKey'), interfaces: array(string), dependencies: array(ref('NodeKey')),
+            contents: array(ref('ContentResult')), facts: array(ref('TestGraphFact')), warnings: array(string)
+        }),
+        TestAnalysisResult: object({ cases: array(ref('TestCaseAnalysis')), warnings: array(string) }),
         LocationResult: object({ key: ref('NodeKey'), filePath: string, container: nullable(ref('NodeKey')) }),
         FileSelector: object({ kind: { type: 'string', enum: ['file'] }, filePath: string }),
         DependencyResult: object({
@@ -88,6 +101,8 @@ export const resultSchema = {
     getAllFunctions: array(ref('NodeKey')),
     getCallees: ref('CallResult'),
     getContent: ref('ContentResult'),
+    getSourceUnit: ref('SourceUnitResult'),
+    getTestAnalysis: ref('TestAnalysisResult'),
     getLocation: ref('LocationResult'),
     getDependencies: ref('DependencyResult')
 };
