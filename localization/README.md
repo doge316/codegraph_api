@@ -1,6 +1,6 @@
 # ScopeTrans定位接口
 
-两个Python接口共用书畅的CodeGraph HTTP服务：公有测试生成独立功能组、候选关系与批次，已知源函数名提取完整类／函数及依赖。不执行翻译、测试或文件编辑，不自动保存输出。
+测试规划和源码提取共用书畅的CodeGraph HTTP服务。测试规划返回“批次→可查询测试引用”；测试组装按批生成累计公有测试文件；源码提取返回可直接交给翻译模型的源码上下文。测试组装显式写入指定输出目录，其余业务调用不自动保存结果。
 
 ## 环境
 
@@ -44,17 +44,24 @@ plan = locator.plan_tests(
 source = locator.extract_source(
     "microsoft_vscode-remote-try-java", "Java", ["getMessage", "evaluateNumber"],
 )
+
+# output_dir须为新的绝对路径；返回每轮累计测试覆盖层的target_project路径。
+rounds = locator.assemble_tests(
+    "microsoft_vscode-remote-try-java", plan,
+    "D:/ScopeTrans-runs/microsoft-java-python",
+)
 ```
 
 实例绑定当前翻译对。换翻译对时重新创建实例；不会根据上一次调用猜仓库路径。
 
 | 结果 | 关键字段 |
 |---|---|
-| 测试规划 | `groups`保留独立功能组与完整cases/support/context/resources；`relations`列出候选组间关系；`batches`引用group_ids并带累计测试标识；`uncertainties`标记局部未解项。 |
-| 源码上下文 | `units[].fragments[].source`是完整原文；`batches`按依赖优先排列单元key；一个单元可能跨多个文件片段。 |
-| 状态 | `ready`表示无已知阻塞；`partial`保留有用结果和未确定项；歧义返回`ambiguous`，未找到返回`not_found`，其他失败返回`error`。 |
+| 测试规划 | `{1: [{projectRoot, key}, ...], 2: [...], ...}`。每批仅包含新增测试；key为`{name, filePath, startLine}`，filePath相对于该引用的projectRoot。 |
+| 测试组装 | `{1: "输出目录/round_001/target_project", ...}`。每轮包含截至当轮的累计公有测试，保留原目录结构和公有辅助代码、资源。 |
+| 源码上下文 | `{status, content, warnings}`。content按依赖优先组织完整类／独立函数及项目内依赖的原文，包含必要导入、文件路径和片段行号；warnings记录歧义、未解依赖及外部依赖／资源提示。 |
+| 错误与状态 | 规划和组装的输入、上游协议、原文不一致及引用错误抛出异常；语义未解沿用原保守分组并输出日志。源码提取仍返回原有ready／partial／ambiguous／not_found／error状态。 |
 
-任务1只读取目标工程中自动发现的`public_test/public_tests`目录；Java深层包目录和Rust的`tests/public_tests`也会发现。辅助代码自动收集，无需逐文件配置。Java的`@MethodSource`静态方法引用和公有辅助类的完整定义纳入支持闭包；测试外层类只保留上下文，避免夹带后轮测试。任务2读取同仓库`source_project`。核心不修改源码；HTTP索引会写`.codegraph`元数据。
+任务1只读取目标工程中自动发现的`public_test/public_tests`目录；Java深层包目录和Rust的`tests/public_tests`也会发现。辅助代码自动收集，无需逐文件配置。任务2读取同仓库`source_project`。不修改数据集源码；HTTP索引会写`.codegraph`元数据。Python客户端兼容上游函数清单返回三元key或旧版原生节点，以及新版getLocation返回结构。
 
 两接口之间的跨语言函数名映射由总编排另行提供。阶段顺序来自公有测试证据，不等于证明源实现没有隐藏依赖；静态提取也不能保证解析反射或所有动态派发。
 
@@ -98,39 +105,62 @@ LLM_TEMPERATURE=0
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe .\dev\localization\check_interfaces.py plan --repo microsoft_vscode-remote-try-java
+.\.venv\Scripts\python.exe .\dev\localization\check_interfaces.py assemble --repo microsoft_vscode-remote-try-java
 .\.venv\Scripts\python.exe .\dev\localization\check_interfaces.py source --repo microsoft_vscode-remote-try-java --functions getMessage evaluateNumber
 ```
 
-脚本默认读取根目录本地配置，将完整JSON与阅读报告写入忽略上传的开发输出目录，`partial`等非ready结果退出码为2。重新部署后生产接口可直接调用，本地检查文件需另行准备。
+脚本默认读取根目录本地配置，将JSON与report.txt写入忽略上传的开发输出目录。assemble另保存rounds.json及累计测试文件；source另将content原样保存为source_context.md，partial等非ready结果退出码为2。重新部署后生产接口可直接调用，本地检查文件需另行准备。
 
-公有支持闭包保留GoogleTest参数化注册与Rust辅助类型的impl和常量；未解调用只标记或合并相关功能组并返回partial。源码提取补齐C++模板类外定义、C#泛型接口和Python项目内星号导入。
+公有支持闭包保留GoogleTest参数化注册与Rust辅助类型的impl和常量；未解调用仍在内部标记或合并相关功能组，并输出诊断日志。源码提取补齐C++模板类外定义、C#泛型接口和Python项目内星号导入。
 
 LLM仅接收未解项直接对应的结构化证据、已有功能与用例映射和必要公有原文；被完整辅助类型包含的方法原文不重复发送。内部长标识映射为短ID，响应恢复原ID后继续校验；不以丢弃测试或截断源码缩短请求。
 
-旧版量化基线保留在忽略上传的dev/localization/output/audit35，不能视作新输出的排序可靠率。源码依赖仍可能保守多提取，动态或反射未解时保留partial，不将候选阶段当成已证明的源调用图。
+源码依赖仍可能保守多提取，动态或反射未解时保留partial；测试批次来自公有证据，不是已证明完整的源调用图。
 
 ## 接口1输出
 
-输入仍为plan_tests(translation_pair, repository_name, use_llm)，不增加配置或参数。原stages字段替换为以下结构：
+输入仍为plan_tests(translation_pair, repository_name, use_llm)，不增加配置或参数：
 
 ```python
-for group in plan["groups"]:
-    print(group["id"], group["interfaces"], group["status"])
-    # group["cases"]、support、context、resources保留完整公有材料。
-for relation in plan["relations"]:
-    print(relation["before"], "→", relation["after"], relation["kind"])
-for batch in plan["batches"]:
-    print(batch["index"], batch["group_ids"], batch["cumulative_case_keys"])
-for item in plan["uncertainties"]:
-    print(item["id"], item["group_ids"], item["message"])
+for batch, tests in plan.items():
+    for ref in tests:
+        print(batch, ref["projectRoot"], ref["key"])
 ```
 
-相同业务接口集合的完整用例可跨文件归组；同层不同组保持独立。共享状态与循环只合并相关范围。relations的certainty均为candidate：test_fact来自公测数据流，interface_subset是较小接口集合优先的增量候选，llm_semantic_candidate来自模型语义建议；均不构成隐藏源码依赖的证明。同组内允许依赖，不拆测试断言。
+静态分析、可选LLM、内部功能分组、候选关系和分层策略继续沿用旧版。对外只保留批次和可查询引用；每例只出现一次，不拆测试断言。无法唯一绑定上游节点时明确报错，不伪造key或丢弃用例。JSON保存后批次编号会变为字符串，组装接口可读入该结果。
 
-批次是候选安排，同批不代表已证明可并行。G编号是标识，不是顺序；按batches读取顺序。接口2的输入输出不变。历史audit35结果保留旧结构，不覆盖为新版本测量结果。
+## 累计测试文件
 
-当前79项回归通过（含12项真实HTTP、13项源码依赖精确性检查）。35个样本的静态／静态＋LLM评估位于dev/localization/output/interface1_eval_2026-10-26；按公测未发现反向依赖即通过的口径，两模式均为35/35，平均候选批次均为2.03。19个样本实际调用LLM；Rust计时器样本提高至16384输出上限后单独重测，8560 Token正常结束，最终19个建议响应均通过格式与引用校验。原2048失败记录及重测消耗另行保留。
+```text
+output_dir/
+  round_001/
+    manifest.json
+    target_project/原公有测试相对路径/...
+  round_002/
+    manifest.json
+    target_project/原公有测试相对路径/...
+```
 
-接口2按原35个样本、69次查询和相同参考清单重测：入口定位69/69、完整单元提取141/141、必要依赖召回133/133；依赖精确率由133/202（65.84%）提高至133/133（100.00%）。C++合并实现时排除测试侧原型，保留真实头文件；Python按完整提取单元的实际引用筛选导入，保留可能的模块初始化、包初始化和动态访问依赖。结果限于本次参考清单，复杂动态情况仍保守保留并报告未解项。原35份接口1静态计划重跑比较无语义变化，上游代码未修改。本轮原始输出、对照及核查说明位于dev/localization/output/source_precision_v2_2026-10-26；没有新增LLM请求。
+第N轮只保留第1至N批用例的完整正文，将后轮测试声明替换为空白，保留行号、原编码和换行；Python空语句块补pass。非测试定义、fixture、导入、资源和文件相对路径保留。manifest记录新增及累计用例引用和公有根目录。输入计划须覆盖当前全部已识别公测，不允许重复、遗漏或外部引用；不覆盖已有输出目录。
 
-已解析接口按规范标识归组；未解接收者不因显示名称相同就强行视为同一功能，保留各自未解标记。候选批次不是实际执行顺序已获源码证明的结论。
+生成的target_project是测试覆盖层：将其文件按相对路径放入当轮译后工程，沿用总架构提供的统一测试配置执行。它不包含业务实现、私有测试、构建工具或第三方依赖。顶层导入和辅助代码保持原行为，其要求的业务接口仍须由当轮工程提供。准备每轮环境时完整替换公有测试目录，避免旧文件残留；目录外的私有测试不属于本轮公测执行范围。
+
+## 接口2输出
+
+```python
+result = locator.extract_source(repository_name, source_language, function_names)
+# {"status": "ready", "content": "源语言、请求入口与依赖优先排列的源码原文", "warnings": []}
+source_context = result["content"]
+```
+
+输入不变。content用代码块展示原文，按文件标明完整类／函数与导入上下文；同一单元跨文件的partial类型、C++声明和类外实现分别保留。同一依赖片段只出现一次；循环依赖保留在同一依赖层。必要导入沿用原提取结果，不补写或改写业务代码。该内容供模型阅读，不是可以直接执行的合并源码文件。
+
+| status | content与调用方处理 |
+|---|---|
+| ready | 已完成当前静态提取与原文核对；可使用content，外部依赖和资源仍见warnings。 |
+| partial | 返回已确认源码，同时在warnings列出未解项；调用方需处理这些限制后再决定是否翻译。 |
+| ambiguous | 入口同名歧义；content为空，warnings列出候选位置，调用方可改用限定名称重新查询。 |
+| not_found | 未找到请求入口；content为空，warnings给出缺失名称。 |
+| error | 输入、上游查询或原文一致性检查失败；content为空，warnings给出原因。 |
+
+完整中间结果保留入口解析、源码单元、依赖边及依赖批次，使用localization.api的DEBUG日志查看；不作为简化接口的返回字段。

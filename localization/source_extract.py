@@ -125,7 +125,8 @@ def extract_source(service, repo, names, result):
     result["units"] = [{"key": keys[u.unit_id], "kind": u.kind, "qualified_name": u.qualified_name,
         "fragments": [{"file": f.location.file_path, "start_line": f.location.start_line,
                        "end_line": f.location.end_line, "source": f.source} for f in u.fragments],
-        "imports": list(u.imports), "reason": u.reason} for u in sorted(retained, key=lambda u: keys[u.unit_id])]
+        "imports": list(u.imports), "import_fragments": _import_fragments(u, retained, inventory, parser),
+        "reason": u.reason} for u in sorted(retained, key=lambda u: keys[u.unit_id])]
     result["dependencies"] = edges
     result["batches"] = layers(keys.values(), [(e["source"], e["target"]) for e in edges])
     for file in sorted({f.location.file_path for u in retained for f in u.fragments}):
@@ -146,6 +147,29 @@ def extract_source(service, repo, names, result):
     result["diagnostics"] = list({d.to_json(): d.to_dict() for d in diagnostics}.values())
     result["status"] = "error" if any(d.code == "SOURCE_CHANGED" for d in diagnostics) else "partial" if any(d.blocking for d in diagnostics) else "ready"
     return result
+
+
+def _import_fragments(unit, retained, inventory, parser):
+    """给已选中的导入附上原文件与位置；不扩大导入或依赖范围。"""
+    contexts = []
+    for file in dict.fromkeys(f.location.file_path for f in unit.fragments):
+        parsed, source = inventory.files[file], parser.sources[file]
+        for text in dict.fromkeys(item for item in parsed.imports if item in unit.imports):
+            locations = dict.fromkeys(r.location for r in parsed.references
+                if r.kind in {'import', 'include'} and source.fragment(r.location).source == text)
+            if not locations:
+                # 部分导入节点没有生成调用引用，仍保留解析器记录的真实原文与文件。
+                if not any(f.location.file_path == file and text in f.source for other in retained for f in other.fragments):
+                    contexts.append({'file': file, 'source': text})
+                continue
+            for location in locations:
+                if any(covers(f.location, location) for other in retained for f in other.fragments):
+                    continue
+                contexts.append({'file': file, 'start_line': location.start_line,
+                                 'end_line': location.end_line, 'source': text})
+    return contexts
+
+
 SKIP_DIRECTORIES = {'.git', '.codegraph', 'node_modules', '.venv', 'venv', '__pycache__'}
 
 EXTENSIONS = {'python': {'.py', '.pyi'}, 'java': {'.java'}, 'csharp': {'.cs'}, 'cpp': {'.h', '.hh', '.hpp', '.hxx', '.c', '.cc', '.cpp', '.cxx'}}

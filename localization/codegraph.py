@@ -55,9 +55,17 @@ class CodeGraph:
 
     def functions(self, root):
         rows = self.call("getAllFunctions", root)
-        if not isinstance(rows, list) or any(not isinstance(n, dict) or not {"id", "name", "filePath", "startLine"} <= n.keys() for n in rows):
+        if not isinstance(rows, list) or any(not isinstance(n, dict) or not {"name", "filePath", "startLine"} <= n.keys() for n in rows):
             raise GraphError("GRAPH_PROTOCOL_ERROR", "函数清单缺少必要节点字段")
-        return rows
+        resolved = []
+        for row in rows:
+            if 'id' not in row:
+                node = self.content(root, node=row).get('node')
+                if not isinstance(node, dict) or not {'id', 'name', 'filePath', 'startLine'} <= node.keys() or self.key(node) != self.key(row):
+                    raise GraphError('GRAPH_PROTOCOL_ERROR', '函数key未能恢复为一致的原生节点')
+                row = node
+            resolved.append(row)
+        return resolved
 
     def callees(self, root, node):
         result = self.call("getCallees", root, key=self.key(node))
@@ -67,6 +75,8 @@ class CodeGraph:
 
     def location(self, root, node):
         result = self.call("getLocation", root, key=self.key(node))
+        if isinstance(result, dict) and 'node' not in result and isinstance(result.get('key'), dict):
+            result = {**result, 'node': self.content(root, node=result['key']).get('node')}
         if not isinstance(result, dict) or not isinstance(result.get('filePath'),str) or not isinstance(result.get('node'),dict) or not (result.get('container') is None or isinstance(result.get('container'),dict)):
             raise GraphError('GRAPH_PROTOCOL_ERROR', '所属类型结果缺少合法位置')
         return result

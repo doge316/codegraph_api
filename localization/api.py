@@ -1,4 +1,4 @@
-"""供ScopeTrans总编排调用的两个业务接口。"""
+"""供ScopeTrans总编排调用的测试规划、测试组装与源码提取。"""
 from copy import deepcopy
 from pathlib import Path
 
@@ -31,11 +31,19 @@ class Localization:
             repo = repository(self.root, self.pair, repository_name)
             return plan_tests(self, repo, result, use_llm)
         except (ValueError, TypeError, OSError, GraphError) as exc:
-            result["diagnostics"].append({"code": getattr(exc, "code", "PLAN_ERROR"), "message": str(exc), "blocking": True})
-            return result
+            import logging
+            logging.getLogger(__name__).error('测试规划失败：%s', exc)
+            raise
+
+    def assemble_tests(self, repository_name, batches, output_dir):
+        from .assembly import assemble_tests
+        repo = repository(self.root, self.pair, repository_name)
+        return assemble_tests(self, repo, batches, output_dir)
 
     def extract_source(self, repository_name, source_language, function_names):
         from .source_extract import extract_source
+        from .source_context import render_source
+        import logging
         result = {"status": "error", "repository_name": repository_name, "source_language": self.source,
                   "resolutions": [], "units": [], "dependencies": [], "batches": [],
                   "external_dependencies": [], "resources": [], "diagnostics": []}
@@ -45,7 +53,11 @@ class Localization:
             if not isinstance(function_names, list) or not function_names or any(not isinstance(n, str) or not n.strip() for n in function_names):
                 raise ValueError("function_names必须是非空函数名称列表")
             repo = repository(self.root, self.pair, repository_name)
-            return extract_source(self, repo, list(dict.fromkeys(function_names)), result)
+            extract_source(self, repo, list(dict.fromkeys(function_names)), result)
+            rendered = render_source(result)
         except (ValueError, TypeError, OSError, GraphError) as exc:
+            result['status'] = 'error'
             result["diagnostics"].append({"code": getattr(exc, "code", "EXTRACTION_ERROR"), "message": str(exc), "blocking": True})
-            return result
+            rendered = render_source({**result, 'status': 'error'})
+        logging.getLogger(__name__).debug('源码提取中间结果：%s', result)
+        return rendered

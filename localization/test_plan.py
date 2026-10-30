@@ -271,49 +271,18 @@ def _group_plan(bundle, inventory, candidate, advice):
 
 
 def plan_tests(service, repo, result, use_llm):
-    from pathlib import Path
-    import hashlib
-    from .config import public_directories, files_under, route, SDK_LANGUAGES
+    import logging
+    from .test_inputs import read_public, query_public, case_references, unchanged
     from .llm import suggest
-    root = (repo / "target_project").resolve()
-    if not root.is_relative_to(repo.resolve()) or not root.is_dir():
-        raise ValueError("target_project不存在或越界")
-    roots = public_directories(root)
-    result["public_roots"] = [p.relative_to(root).as_posix() for p in roots]
-    parser = route(service.target, "Test")
-    files, nodes, calls, contents = [], [], [], []
-    for public in roots:
-        for path in files_under(public):
-            relative = path.relative_to(root).as_posix()
-            raw = path.read_bytes()
-            code = path.suffix in parser.extensions
-            role = "test" if code else "resource"
-            if path.suffix == ".py" and not (path.name.startswith("test") or path.name.endswith("_test.py")):
-                role = "helper"
-            files.append(PublicFile(relative, raw, hashlib.sha256(raw).hexdigest(), role))
-        service.graph.prepare(public, SDK_LANGUAGES[service.target])
-        graph_nodes = service.graph.functions(public)
-        prefix = public.relative_to(root).as_posix()
-        identity = lambda n: prefix + ":" + n
-        for node in graph_nodes:
-            path = (public / node["filePath"]).resolve()
-            if not path.is_relative_to(public):
-                raise ValueError("图节点路径超出公有目录")
-            nodes.append(GraphNode(identity(node["id"]), node["name"], node.get("kind", "function"), path.relative_to(root).as_posix(),
-                                   node["startLine"], node.get("endLine", node["startLine"]), node.get("qualifiedName")))
-            returned = service.graph.callees(public, node)
-            calls.extend(GraphCall(identity(e["source"]), identity(e["target"])) for e in returned.get("edges", []))
-        for file in (f for f in files if f.role != "resource" and (root / f.relative_path).is_relative_to(public)):
-            content = service.graph.content(public, file=(root / file.relative_path).relative_to(public).as_posix())
-            contents.append(GraphContent(file.relative_path, content["source"]))
-    fingerprint = stable_id([(f.relative_path, f.sha256) for f in files])
-    bundle = PublicBundle(root, tuple(files), fingerprint)
-    snapshot = TestGraphSnapshot(fingerprint, tuple(nodes), tuple(calls), tuple(contents))
+    bundle, roots, parser = read_public(service, repo)
+    result['public_roots'] = [p.relative_to(bundle.root).as_posix() for p in roots]
+    snapshot, references = query_public(service, bundle, roots)
     inventory = analyse_tests(bundle, snapshot, parser)
     result["diagnostics"] = [d.to_dict() for d in inventory.diagnostics]
+    if any(d.code == 'PARSE_ERROR' for d in inventory.diagnostics):
+        raise ValueError('PARSE_ERROR：公有测试无法完整解析，不能返回不完整计划')
     if not inventory.cases:
-        result["diagnostics"].append({"code": "NO_PUBLIC_CASES", "message": "没有识别到支持的公有测试用例", "blocking": True})
-        return result
+        raise ValueError('NO_PUBLIC_CASES：没有识别到支持的公有测试用例')
     candidate = infer_relations(inventory)
     advice = suggest(service.config, candidate, inventory, use_llm, service.llm_call)
     result["llm_used"], result["llm_usage"] = advice["called"], advice["usage"]
@@ -323,11 +292,18 @@ def plan_tests(service, repo, result, use_llm):
     for item in pending:
         result["diagnostics"].append({"code": "UNRESOLVED_TEST", "message": item.reason, "blocking": True,
                                       "cases": [c.runtime_selector for c in inventory.cases if c.case_id in item.case_ids]})
-    for f in files:
-        if hashlib.sha256((root / f.relative_path).read_bytes()).hexdigest() != f.sha256:
-            result["diagnostics"].append({"code": "SOURCE_CHANGED", "message": f.relative_path, "blocking": True})
-    result["status"] = "partial" if any(d.get("blocking", True) for d in result["diagnostics"]) else "ready"
-    return result
+    unchanged(bundle)
+    for item in result['diagnostics']:
+        logging.getLogger(__name__).warning('%s：%s', item['code'], item['message'])
+    if result['llm_used']:
+        logging.getLogger(__name__).info('LLM调用用量：%s', result['llm_usage'])
+    mapped = case_references(inventory.cases, snapshot, references)
+    by_group = {g['id']: g for g in result['groups']}
+    batches = {b['index']: [mapped[c['key']] for gid in b['group_ids'] for c in by_group[gid]['cases']]
+               for b in result['batches']}
+    if sum(map(len, batches.values())) != len(mapped):
+        raise ValueError('批次用例存在遗漏或重复')
+    return batches
 def analyse_tests(bundle: PublicBundle, snapshot: TestGraphSnapshot, route) -> TestInventory:
     if snapshot.input_hash != bundle.input_hash:
         raise ValueError('图快照与公有输入不一致')
