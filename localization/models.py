@@ -51,54 +51,8 @@ class PublicBundle(Model):
     input_hash: str
 
 @dataclass(frozen=True)
-class GraphNode(Model):
-    id: str
-    name: str
-    kind: str
-    file_path: str
-    start_line: int
-    end_line: int
-    qualified_name: str | None = None
-
-@dataclass(frozen=True)
-class GraphCall(Model):
-    source_id: str
-    target_id: str
-
-@dataclass(frozen=True)
-class GraphContent(Model):
-    file_path: str
-    source: str
-
-@dataclass(frozen=True)
-class TestGraphSnapshot(Model):
-    __test__ = False
-    input_hash: str
-    nodes: tuple[GraphNode, ...] = ()
-    calls: tuple[GraphCall, ...] = ()
-    contents: tuple[GraphContent, ...] = ()
-    diagnostics: tuple[Diagnostic, ...] = ()
-
-@dataclass(frozen=True)
-class Evidence(Model):
-    evidence_id: str
-    location: Location
-    kind: str
-    fact: dict[str, Any]
-    origin: Literal['ast', 'codegraph', 'llm'] = 'ast'
-
-@dataclass(frozen=True)
-class InterfaceRef(Model):
-    interface_id: str
-    spelling: str
-    receiver_origin: str | None
-    role: Literal['construct', 'prepare', 'asserted', 'cleanup', 'unknown']
-    evidence_ids: tuple[str, ...]
-    resolution: Literal['resolved', 'unknown'] = 'resolved'
-
-@dataclass(frozen=True)
 class SupportUnit(Model):
-    unit_id: str
+    unit_id: tuple[str, str, int]
     name: str
     container: str
     location: Location
@@ -109,25 +63,15 @@ class SupportUnit(Model):
 @dataclass(frozen=True)
 class TestCase(Model):
     __test__ = False
-    case_id: str
+    case_id: tuple[str, str, int]
     file_path: str
     container: str
     name: str
     location: Location
     parameterization: Literal['none', 'static', 'dynamic']
-    asserted_interfaces: tuple[str, ...]
-    requirements: tuple[InterfaceRef, ...]
-    support_ids: tuple[str, ...]
+    requirements: tuple[str, ...]
+    support_ids: tuple[tuple[str, str, int], ...]
     runtime_selector: str
-    fixture_names: tuple[str, ...] = ()
-
-@dataclass(frozen=True)
-class UnresolvedItem(Model):
-    item_id: str
-    case_ids: tuple[str, ...]
-    reason: str
-    evidence_ids: tuple[str, ...]
-    can_ask_llm: bool
 
 @dataclass(frozen=True)
 class ParsedTests(Model):
@@ -135,54 +79,7 @@ class ParsedTests(Model):
     framework: str
     cases: tuple[TestCase, ...]
     support_units: tuple[SupportUnit, ...]
-    syntax_facts: tuple[Evidence, ...]
-    unresolved: tuple[UnresolvedItem, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
-
-@dataclass(frozen=True)
-class TestInventory(Model):
-    __test__ = False
-    input_hash: str
-    framework: str
-    cases: tuple[TestCase, ...]
-    support_units: tuple[SupportUnit, ...]
-    facts: tuple[Evidence, ...]
-    unresolved: tuple[UnresolvedItem, ...] = ()
-    diagnostics: tuple[Diagnostic, ...] = ()
-    snippets: dict[str, str] = field(default_factory=dict)
-
-@dataclass(frozen=True)
-class Feature(Model):
-    feature_id: str
-    name: str
-    interface_ids: tuple[str, ...]
-
-@dataclass(frozen=True)
-class Assignment(Model):
-    case_id: str
-    feature_ids: tuple[str, ...]
-
-@dataclass(frozen=True)
-class Relation(Model):
-    before_feature: str
-    after_feature: str
-    basis: Literal['test_fact', 'semantic_candidate']
-    evidence_ids: tuple[str, ...]
-
-@dataclass(frozen=True)
-class AtomicConstraint(Model):
-    case_ids: tuple[str, ...]
-    reason: str
-    ordered: bool = False
-
-@dataclass(frozen=True)
-class CandidatePlan(Model):
-    features: tuple[Feature, ...]
-    assignments: tuple[Assignment, ...]
-    relations: tuple[Relation, ...]
-    atomic_constraints: tuple[AtomicConstraint, ...]
-    unresolved: tuple[UnresolvedItem, ...]
-    evidence: tuple[Evidence, ...]
 
 @dataclass(frozen=True)
 class SourceSymbol(Model):

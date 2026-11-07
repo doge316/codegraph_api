@@ -1,5 +1,4 @@
 """总配置与数据集位置；不读取YAML，不猜测当前翻译对。"""
-from importlib import import_module
 from pathlib import Path
 
 ALIASES = {"python": "Python", "java": "Java", "c#": "C#", "csharp": "C#",
@@ -26,13 +25,17 @@ def pair_name(value):
     return pair
 
 
-def route(value, purpose):
+def route(value, purpose, *, graph=None):
+    from .test_analysis import UpstreamTests
+    from .source_analysis import UpstreamSource, PythonSource
     sdk = SDK_LANGUAGES[language(value)]
-    if purpose == "Source" and sdk == "rust":
-        raise ValueError("Rust不是当前七翻译对的源语言")
-    module = import_module(".languages." + sdk, "localization")
-    name = {"python": "Python", "java": "Java", "csharp": "CSharp", "cpp": "Cpp", "rust": "Rust"}[sdk]
-    return getattr(module, purpose + name + "Route")()
+    if purpose == 'Source' and sdk == 'rust':
+        raise ValueError('Rust不是当前七翻译对的源语言')
+    if purpose == 'Test':
+        return UpstreamTests(sdk, graph)
+    if purpose == 'Source':
+        return (PythonSource if sdk == 'python' else UpstreamSource)(sdk, graph)
+    raise ValueError('未知分析用途：' + str(purpose))
 
 
 def repository(root, pair, name):

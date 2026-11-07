@@ -3,61 +3,48 @@ from copy import deepcopy
 from pathlib import Path
 
 from .config import language, pair_name, repository
-from .codegraph import CodeGraph, GraphError
+from .codegraph import CodeGraph, GraphError, request_scope
 
 
 class Localization:
     def __init__(self, config, *, llm_call=None):
         self.config = deepcopy(config)
         data = self.config["dataset"]
-        root = Path(data["path"])
-        if not root.is_absolute():
-            raise ValueError("dataset.path须由调用方解析为绝对路径")
-        self.root = root.resolve()
+        # 与ScopeTrans的_get_projects保持一致：相对路径以启动目录为基准。
+        self.root = Path(data["path"]).expanduser().resolve()
         self.source, self.target = language(data["source_lang"]), language(data["target_lang"])
         self.pair = pair_name(self.source + "_to_" + self.target)
         self.graph = CodeGraph(self.config.get("codegraph", {}))
-        self.llm_call = llm_call
+        from .llm import configured_call
+        self.llm_call = llm_call if llm_call is not None else configured_call(self.config)
 
+    @request_scope
     def plan_tests(self, translation_pair, repository_name, use_llm):
         from .test_plan import plan_tests
-        result = {"status": "error", "translation_pair": self.pair, "repository_name": repository_name,
-                  "public_roots": [], "groups": [], "relations": [], "batches": [], "uncertainties": [], "llm_used": False, "llm_usage": None, "diagnostics": []}
-        try:
-            if type(use_llm) is not bool:
-                raise ValueError("use_llm必须是bool")
-            if pair_name(translation_pair) != self.pair:
-                raise ValueError("请求翻译对与实例绑定的翻译对不一致")
-            repo = repository(self.root, self.pair, repository_name)
-            return plan_tests(self, repo, result, use_llm)
-        except (ValueError, TypeError, OSError, GraphError) as exc:
-            import logging
-            logging.getLogger(__name__).error('测试规划失败：%s', exc)
-            raise
+        if type(use_llm) is not bool:
+            raise ValueError("use_llm必须是bool")
+        return plan_tests(self, translation_pair, repository_name, use_llm)
 
-    def assemble_tests(self, repository_name, batches, output_dir):
+    @request_scope
+    def assemble_tests(self, batches, test_directories, *, output_dir=None):
         from .assembly import assemble_tests
-        repo = repository(self.root, self.pair, repository_name)
-        return assemble_tests(self, repo, batches, output_dir)
+        return assemble_tests(batches, test_directories, output_dir=output_dir,
+                              language=self.target, graph=self.graph)
 
+
+    @request_scope
     def extract_source(self, repository_name, source_language, function_names):
+        """返回源码位置与项目内外依赖；预期提取失败记日志并返回空字典。"""
         from .source_extract import extract_source
-        from .source_context import render_source
         import logging
-        result = {"status": "error", "repository_name": repository_name, "source_language": self.source,
-                  "resolutions": [], "units": [], "dependencies": [], "batches": [],
-                  "external_dependencies": [], "resources": [], "diagnostics": []}
         try:
             if language(source_language) != self.source:
-                raise ValueError("请求源语言与实例绑定的翻译对不一致")
+                raise ValueError("源语言与绑定翻译对不一致")
             if not isinstance(function_names, list) or not function_names or any(not isinstance(n, str) or not n.strip() for n in function_names):
-                raise ValueError("function_names必须是非空函数名称列表")
+                raise ValueError("function_names须为非空函数名列表")
             repo = repository(self.root, self.pair, repository_name)
-            extract_source(self, repo, list(dict.fromkeys(function_names)), result)
-            rendered = render_source(result)
-        except (ValueError, TypeError, OSError, GraphError) as exc:
-            result['status'] = 'error'
-            result["diagnostics"].append({"code": getattr(exc, "code", "EXTRACTION_ERROR"), "message": str(exc), "blocking": True})
-            rendered = render_source({**result, 'status': 'error'})
-        logging.getLogger(__name__).debug('源码提取中间结果：%s', result)
-        return rendered
+            return extract_source(self, repo, list(dict.fromkeys(function_names)))
+        except (ValueError, OSError, GraphError) as exc:
+            logging.getLogger(__name__).error('源码提取失败 repo=%s entries=%s [%s]：%s',
+                repository_name, function_names, getattr(exc, 'code', type(exc).__name__), exc)
+            return {}
