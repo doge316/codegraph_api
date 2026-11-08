@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .codegraph import CodeGraph, GraphError
 from .models import *
-from .languages.common import SourceText, CALL_KINDS, TYPE_KINDS, covers, diagnostic, checked_content, location, key_id
+from .source_text import SourceText, CALL_KINDS, TYPE_KINDS, covers, diagnostic, checked_content, location, key_id
 from pathlib import PurePosixPath
 from .models import Reference, SourceUnit, stable_id
 

@@ -1,4 +1,4 @@
-"""书畅HTTP接口的薄客户端；不创建或管理Node进程。"""
+"""HTTP接口的薄客户端；不创建或管理Node进程。"""
 import json
 from urllib import request, error
 from contextvars import ContextVar

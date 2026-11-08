@@ -7,7 +7,7 @@ from .codegraph import CodeGraph, GraphError, request_scope
 
 
 class Localization:
-    def __init__(self, config, *, llm_call=None):
+    def __init__(self, config):
         self.config = deepcopy(config)
         data = self.config["dataset"]
         # 与ScopeTrans的_get_projects保持一致：相对路径以启动目录为基准。
@@ -15,8 +15,6 @@ class Localization:
         self.source, self.target = language(data["source_lang"]), language(data["target_lang"])
         self.pair = pair_name(self.source + "_to_" + self.target)
         self.graph = CodeGraph(self.config.get("codegraph", {}))
-        from .llm import configured_call
-        self.llm_call = llm_call if llm_call is not None else configured_call(self.config)
 
     @request_scope
     def plan_tests(self, translation_pair, repository_name, use_llm):

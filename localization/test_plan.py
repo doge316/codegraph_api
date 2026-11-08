@@ -4,7 +4,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 from .ordering import layers
-from .test_analysis import read_public, reference_identity, case_reference, unchanged, source_snapshot, check_snapshot, read_review_files
+from .test_analysis import read_public, reference_identity, case_reference, unchanged, source_snapshot, check_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,5 @@ def plan_tests(service, translation_pair, repository_name, use_llm):
     """三个主要调用：静态分析 → 可选模型复核 → 模型结果校验。"""
     from .llm import llm_review
     batches, review, paths, constraints = static_analysis(service, translation_pair, repository_name)
-    files = read_review_files(paths, constraints['snapshot']) if use_llm and review else []
-    candidate = llm_review(batches, review, files, constraints, use_llm,
-                           config=service.config, callback=service.llm_call)
+    candidate = llm_review(batches, review, paths, constraints, use_llm)
     return validate_llm_result(candidate, batches, review, constraints, use_llm)

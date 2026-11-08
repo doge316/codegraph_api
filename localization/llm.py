@@ -1,9 +1,13 @@
-"""批次复核提示词与模型调用；本地沿用.env或调用方注入的适配器。"""
+"""批次复核提示词与模型调用；模型配置统一读取.env。"""
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
 from urllib import request
+
+from .source_text import SourceText
+from .test_analysis import check_snapshot
 
 ENV_FILE = Path(__file__).resolve().parent.parent / '.env'
 
@@ -34,30 +38,28 @@ def load_model_settings(env_file=None):
             'temperature': temperature, 'max_tokens': max_tokens, 'thinking': thinking}
 
 
-def configured_call(config):
-    """需要复核时才读取.env，不引入ScopeTrans总架构的SDK依赖。"""
-    def call(messages):
-        settings = load_model_settings()
-        payload = {'model': settings['model'], 'messages': messages,
-                   'temperature': settings['temperature'], 'max_tokens': settings['max_tokens']}
-        if settings['thinking']:
-            payload['thinking'] = {'type': settings['thinking']}
-        req = request.Request(settings['endpoint'], data=json.dumps(payload).encode(), method='POST',
-            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + settings['key']})
-        with request.urlopen(req, timeout=settings['timeout']) as response:
-            try:
-                raw = json.load(response)
-            except (ValueError, UnicodeError) as exc:
-                raise OSError('模型接口未返回有效JSON') from exc
-        choices = raw.get('choices') if isinstance(raw, dict) else None
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise OSError('模型接口响应缺少choices')
-        message = choices[0].get('message')
-        if not isinstance(message, dict) or not isinstance(message.get('content'), str):
-            raise OSError('模型接口响应缺少文本content')
-        return {'content': message['content'], 'finish_reason': choices[0].get('finish_reason'),
-                'usage': raw.get('usage')}
-    return call
+def _call_model(messages):
+    """读取.env配置并调用模型，返回回复内容、结束原因和用量。"""
+    settings = load_model_settings()
+    payload = {'model': settings['model'], 'messages': messages,
+               'temperature': settings['temperature'], 'max_tokens': settings['max_tokens']}
+    if settings['thinking']:
+        payload['thinking'] = {'type': settings['thinking']}
+    req = request.Request(settings['endpoint'], data=json.dumps(payload).encode(), method='POST',
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + settings['key']})
+    with request.urlopen(req, timeout=settings['timeout']) as response:
+        try:
+            raw = json.load(response)
+        except (ValueError, UnicodeError) as exc:
+            raise OSError('模型接口未返回有效JSON') from exc
+    choices = raw.get('choices') if isinstance(raw, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise OSError('模型接口响应缺少choices')
+    message = choices[0].get('message')
+    if not isinstance(message, dict) or not isinstance(message.get('content'), str):
+        raise OSError('模型接口响应缺少文本content')
+    return {'content': message['content'], 'finish_reason': choices[0].get('finish_reason'),
+            'usage': raw.get('usage')}
 
 
 SYSTEM = """根据静态批次和公有测试源码，复核指定用例所属的批次，必要时比较其他批次的用例。
@@ -77,19 +79,38 @@ def _json_object(pairs):
     return result
 
 
-def llm_review(batches, review_cases, files, constraints, use_llm, *, config=None, callback=None):
+def llm_review(batches, review_cases, paths, constraints, use_llm):
     """只捕获模型调用和回复格式错误，内部程序错误仍抛出。"""
     import logging
     from copy import deepcopy
     if not use_llm or not review_cases:
         return deepcopy(batches)
+    snapshot = constraints["snapshot"]
+    check_snapshot(snapshot)
+    root = Path(snapshot['root']).resolve()
+    files, seen = [], set()
+    for value in paths:
+        path = Path(value)
+        if path.is_symlink() or not path.resolve().is_relative_to(root):
+            raise ValueError('复核文件路径越界或被替换为链接')
+        name = path.resolve().relative_to(root).as_posix()
+        if name not in snapshot['files']:
+            raise ValueError('复核文件不属于静态分析快照')
+        if name in seen:
+            continue
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != snapshot['files'][name]:
+            raise ValueError('SOURCE_CHANGED：复核文件变化：' + name)
+        seen.add(name)
+        files.append({'filePath': name, 'startLine': 1,
+                       'source': SourceText(name, raw, name.endswith(('.py', '.pyi'))).text})
     # 文件快照仅供程序核对，不占用模型提示词
     rules = {key: value for key, value in constraints.items() if key != 'snapshot'}
     context = {'batches': batches, 'review_cases': review_cases, 'files': files, 'constraints': rules}
     messages = [{'role': 'system', 'content': SYSTEM},
                 {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}]
     try:
-        response = (callback if callback is not None else configured_call(config))(messages)
+        response = _call_model(messages)
     except OSError as exc:
         logging.getLogger(__name__).warning('LLM复核调用失败，保留静态结果：%s', exc)
         return deepcopy(batches)

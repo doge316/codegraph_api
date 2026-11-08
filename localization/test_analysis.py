@@ -9,7 +9,7 @@ import tempfile
 
 from .codegraph import CodeGraph, GraphError
 from .config import files_under, public_directories, SDK_LANGUAGES
-from .languages.common import SourceText, checked_content, location, diagnostic, key_id
+from .source_text import SourceText, checked_content, location, diagnostic, key_id
 from .models import PublicBundle, PublicFile, ParsedTests, TestCase, SupportUnit
 
 EXTENSIONS = {'python': ('.py', '.pyi'), 'java': ('.java',), 'csharp': ('.cs',),
@@ -79,29 +79,6 @@ def check_snapshot(snapshot, *, roots=None):
     for name, digest in snapshot['files'].items():
         if hashlib.sha256(current[name].read_bytes()).hexdigest() != digest:
             raise ValueError('SOURCE_CHANGED：公测文件变化：' + name)
-
-
-def read_review_files(file_paths, snapshot):
-    """模型复核前读取同一快照的完整文件，不允许路径替换或文件改动。"""
-    check_snapshot(snapshot)
-    root = Path(snapshot['root']).resolve()
-    result, seen = [], set()
-    for value in file_paths:
-        path = Path(value)
-        if path.is_symlink() or not path.resolve().is_relative_to(root):
-            raise ValueError('复核文件路径越界或被替换为链接')
-        name = path.resolve().relative_to(root).as_posix()
-        if name not in snapshot['files']:
-            raise ValueError('复核文件不属于静态分析快照')
-        if name in seen:
-            continue
-        raw = path.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != snapshot['files'][name]:
-            raise ValueError('SOURCE_CHANGED：复核文件变化：' + name)
-        seen.add(name)
-        result.append({'filePath': name, 'startLine': 1,
-                       'source': SourceText(name, raw, name.endswith(('.py', '.pyi'))).text})
-    return result
 
 
 def without_future_tests(file, future, language):

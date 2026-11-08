@@ -6,8 +6,8 @@ import json
 import tokenize
 from dataclasses import replace
 from pathlib import Path
-from ..models import *
-from ..codegraph import GraphError
+from .models import *
+from .codegraph import GraphError
 class Source:
 
     def __init__(self, file: PublicFile, python=False):

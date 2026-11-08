@@ -12,12 +12,12 @@
 
 业务实现集中于 `test_analysis.py`、`test_plan.py`、`llm.py`，内部使用用例三个字段的组合键，不生成组、问题或证据 ID
 
-主流程仅组织以下三个主要调用，源码读取是第2步前的准备工作
+主流程组织以下三个主要调用，文件读取和快照核验在第2步内部完成
 
 | 调用 | 输入 | 输出 |
 |---|---|---|
 | `static_analysis` | 翻译对、仓库名，复用当前实例上下文 | 静态批次、待复核用例、相关文件绝对路径列表、约束字典 |
-| `llm_review` | 静态批次、待复核用例、完整文件原文、约束、LLM开关 | 模型批次，跳过或调用／格式失败时返回静态批次 |
+| `llm_review` | 静态批次、待复核用例、文件绝对路径列表、约束、LLM开关 | 模型批次，跳过或调用／格式失败时返回静态批次 |
 | `validate_llm_result` | 候选批次、静态批次、待复核用例、约束、LLM开关 | 校验通过的批次，跳过或模型结果违规时返回静态批次 |
 
 静态分析内部负责覆盖、安全合批和快照检查，不经过模型结果校验；复核列表不受开关影响，关闭模型或没有待复核用例时，不读取复核原文、不调用模型、不执行模型结果校验
@@ -40,11 +40,10 @@ Localization.plan_tests(翻译对, 仓库名, LLM开关)
        │    read_public(...) → parser.parse(...) → static_batches(...)
        │    读取公测并静态分批，得到批次字典、待复核用例、文件路径和约束
        │
-       ├─ read_review_files(...) [开启LLM且存在待复核用例]
-       │    按静态快照读取完整文件原文，供后续模型复核
-       │
        ├─ llm_review(...)
-       │    输入静态批次、待复核用例、文件原文和约束，返回候选批次
+       │    输入静态批次、待复核用例、文件路径、约束和LLM开关
+       │    核对快照并读取完整原文，组织提示词，再调用 _call_model(...)
+       │    模型配置统一从项目根目录.env读取，返回候选批次
        │    关闭LLM、没有待复核用例或调用失败时返回静态批次
        │
        └─ validate_llm_result(...)
@@ -192,7 +191,7 @@ Localization.extract_source(仓库名, 源语言, 函数名列表)
 
 ## 配置与功能检查
 
-实例绑定配置中的翻译对，数据集根目录取 `dataset.path`，上游地址取 `codegraph.base_url`，模型默认读取根目录 `.env`，也可以通过 `Localization(config, llm_call=...)` 注入已有适配器
+实例绑定配置中的翻译对，数据集根目录取 `dataset.path`，上游地址取 `codegraph.base_url`，模型配置统一读取项目根目录 `.env`
 
 两个接口及组装仅使用基础HTTP查询，不调用 `getTestAnalysis` 或 `getSourceUnit`；基础查询未提供的测试框架、隐式依赖、数据流和完整声明范围由本地Tree-sitter补充
 
@@ -219,6 +218,26 @@ source = locator.extract_source("sample", "Java", ["run"])
 
 Python客户端与CodeGraph服务需要访问同一份工程文件；`projectRoot` 使用服务所在机器可访问的绝对路径
 
-`.env` 沿用 `LLM_ENDPOINT`、`LLM_MODEL`、`LLM_API_KEY`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_TEMPERATURE` 和可选 `LLM_THINKING`；程序按需读取，不在导入、关闭LLM或使用注入适配器时读取密钥
+`.env` 沿用 `LLM_ENDPOINT`、`LLM_MODEL`、`LLM_API_KEY`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_TEMPERATURE` 和可选 `LLM_THINKING`；程序按需读取，不在导入、关闭LLM时读取密钥
 
 接口1和组装通过 `getAllFunctions`、`getLocation`、`getCallees` 和 `getContent` 复用原生节点、归属、调用与原文；本地补充fixture、参数化、生命周期、对象传递及共享初始化信息，接口2另外使用 `getDependencies` 查询类级依赖
+
+## 文件结构与职责
+
+```text
+localization/
+├─ README.md              接口说明、调用示例、主流程和文件职责
+├─ __init__.py            包入口，导出 Localization
+├─ api.py                 对外入口，绑定配置并提供测试规划、组装和源码提取方法
+├─ config.py              语言映射与解析器路由、仓库路径校验、公测目录发现
+├─ codegraph.py           上游HTTP客户端，封装索引、节点、原文和依赖查询
+├─ test_plan.py           接口1主流程，静态分批、安全合批和模型结果校验
+├─ test_analysis.py       接口1与组装共享的公测快照、测试识别、辅助代码及数据流分析
+├─ llm.py                 接口1的原文读取、复核提示词、.env配置、模型调用及回复解析
+├─ assembly.py            组装主流程，逐批生成累计测试副本、核验并发布文件
+├─ source_extract.py      接口2主流程，匹配入口、循环补齐依赖并返回源码范围
+├─ source_analysis.py     源码语法解析、符号匹配、完整类与跨文件片段及依赖分析
+├─ source_text.py         共享源码解码、行号与字节范围、原文核验及诊断函数
+├─ ordering.py            压缩循环依赖，按依赖先后划分接口1的批次层次
+└─ models.py              内部数据记录，描述位置、用例、源码单元、依赖及诊断
+```

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from .codegraph import GraphError
 from .config import SDK_LANGUAGES, route
-from .languages.common import CALL_KINDS, covers
+from .source_text import CALL_KINDS, covers
 from .source_analysis import build_inventory, validate_inventory, external_imports, unit_ranges
 
 logger = logging.getLogger(__name__)
