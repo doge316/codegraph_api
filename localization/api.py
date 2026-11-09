@@ -14,7 +14,7 @@ class Localization:
         self.root = Path(data["path"]).expanduser().resolve()
         self.source, self.target = language(data["source_lang"]), language(data["target_lang"])
         self.pair = pair_name(self.source + "_to_" + self.target)
-        self.graph = CodeGraph(self.config.get("codegraph", {}))
+        self.graph = CodeGraph(self.config["codegraph"])
 
     @request_scope
     def plan_tests(self, translation_pair, repository_name, use_llm):

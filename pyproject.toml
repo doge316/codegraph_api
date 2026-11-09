@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "ScopeTrans public-test planning and complete source extraction"
 requires-python = ">=3.11"
 dependencies = [
+    "PyYAML==6.0.3",
     "python-dotenv==1.2.4",
     "tree-sitter==0.26.0",
     "tree-sitter-python==0.25.0",
@@ -18,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2", "PyYAML==6.0.3"]
+dev = ["pytest==8.4.2"]
 
 [tool.setuptools.packages.find]
 include = ["localization*"]

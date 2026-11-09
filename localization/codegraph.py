@@ -28,10 +28,13 @@ class GraphError(RuntimeError):
 
 class CodeGraph:
     def __init__(self, config):
-        self.base_url = config.get("base_url", "http://127.0.0.1:3000").rstrip("/")
-        self.timeout = config.get("timeout_seconds", 120)
-        if not self.base_url.startswith(("http://", "https://")) or type(self.timeout) not in {int, float} or self.timeout <= 0:
+        if not isinstance(config, dict) or not {"base_url", "timeout_seconds"} <= config.keys():
+            raise ValueError("CodeGraph配置需要base_url和timeout_seconds")
+        self.base_url = config["base_url"]
+        self.timeout = config["timeout_seconds"]
+        if not isinstance(self.base_url, str) or not self.base_url.startswith(("http://", "https://")) or type(self.timeout) not in {int, float} or self.timeout <= 0:
             raise ValueError("CodeGraph地址或超时配置不合法")
+        self.base_url = self.base_url.rstrip("/")
 
     def call(self, method, root, **parameters):
         cache = _request_cache.get()

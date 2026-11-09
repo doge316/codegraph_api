@@ -2,32 +2,10 @@
 from __future__ import annotations
 import hashlib
 import io
-import json
 import tokenize
-from dataclasses import replace
 from pathlib import Path
-from .models import *
+from .models import Diagnostic, Location, SourceFragment
 from .codegraph import GraphError
-class Source:
-
-    def __init__(self, file: PublicFile, python=False):
-        self.file, self.raw = (file, file.content_bytes)
-        self.encoding = tokenize.detect_encoding(io.BytesIO(self.raw).readline)[0] if python else 'utf-8'
-        self.codec = 'utf-8' if self.encoding == 'utf-8-sig' else self.encoding
-        self.text = self.raw.decode(self.encoding)
-        self.lines = self.text.splitlines(keepends=True)
-        self.offsets = [0]
-        for line in self.raw.splitlines(keepends=True):
-            self.offsets.append(self.offsets[-1] + len(line))
-
-    def position(self, line, column):
-        head = self.lines[line - 1].encode('utf-8')[:column].decode('utf-8')
-        return self.offsets[line - 1] + len(head.encode(self.codec)) + (3 if line == 1 and self.raw.startswith(b'\xef\xbb\xbf') else 0)
-
-    def location(self, start, end):
-        return Location(self.file.relative_path, self.raw[:start].count(b'\n') + 1, self.raw[:max(start, end - 1)].count(b'\n') + 1, start, end)
-
-
 TYPE_KINDS = {'class', 'struct', 'interface', 'enum'}
 
 CALL_KINDS = {'function', 'method', 'constructor'}
@@ -46,10 +24,6 @@ class SourceText:
         self.text = raw.decode(self.encoding)
         self.codec = 'utf-8' if self.encoding == 'utf-8-sig' else self.encoding
         self.sha256 = hashlib.sha256(raw).hexdigest()
-        self.lines = self.text.splitlines(keepends=True)
-        self.offsets = [0]
-        for line in raw.splitlines(keepends=True):
-            self.offsets.append(self.offsets[-1] + len(line))
 
     def location(self, start: int, end: int) -> Location:
         if not 0 <= start <= end <= len(self.raw):

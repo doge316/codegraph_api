@@ -8,8 +8,8 @@ from pathlib import Path
 import tempfile
 
 from .codegraph import CodeGraph, GraphError
-from .config import files_under, public_directories, SDK_LANGUAGES
-from .source_text import SourceText, checked_content, location, diagnostic, key_id
+from .config import files_under, public_directories, SDK_LANGUAGES, load_config
+from .source_text import SourceText, diagnostic
 from .models import PublicBundle, PublicFile, ParsedTests, TestCase, SupportUnit
 
 EXTENSIONS = {'python': ('.py', '.pyi'), 'java': ('.java',), 'csharp': ('.cs',),
@@ -98,7 +98,7 @@ class UpstreamTests:
 
     def __init__(self, language, graph=None):
         self.language, self.extensions = language, EXTENSIONS[language]
-        self.graph = graph or CodeGraph({})
+        self.graph = graph if graph is not None else CodeGraph(load_config()["codegraph"])
 
     @contextmanager
     def _roots(self, bundle):

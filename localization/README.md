@@ -1,243 +1,221 @@
 # 定位工具
 
-## 接口1：测试批次
+提供测试分批、累计测试文件组装、源码范围与依赖定位三个功能
 
-`locator.plan_tests(翻译对, 仓库名, LLM开关)` 返回 `{批次编号: 本批新增用例列表}`
+## 接口调用说明
 
-```python
-{1: [{"filePath": "public_tests/test_x.py", "name": "test_x", "startLine": 10}]}
+### 准备与配置
+
+使用Python 3.11及以上版本、Node.js 24，在仓库根目录安装依赖并启动上游HTTP服务
+
+```powershell
+python -m pip install -e .
+npm ci
+npm start
 ```
 
-路径相对于当前仓库的 `target_project`，批次从 1 连续编号，用例只出现一次
+将 `default.yaml` 的 `codegraph.base_url` 填为实际启动的上游HTTP地址，客户端和服务需要能够访问同一份工程文件及组装输出目录
 
-业务实现集中于 `test_analysis.py`、`test_plan.py`、`llm.py`，内部使用用例三个字段的组合键，不生成组、问题或证据 ID
+数据集按 `数据集根目录/翻译对/仓库名/source_project`、`target_project` 存放，公测放在目标工程内的 `public_test` 或 `public_tests` 目录中，可位于子目录
 
-主流程组织以下三个主要调用，文件读取和快照核验在第2步内部完成
+支持 `C#_to_Java`、`C++_to_Python`、`Java_to_C#`、`Java_to_Python`、`Python_to_C++`、`Python_to_Java`、`Python_to_Rust`
 
-| 调用 | 输入 | 输出 |
-|---|---|---|
-| `static_analysis` | 翻译对、仓库名，复用当前实例上下文 | 静态批次、待复核用例、相关文件绝对路径列表、约束字典 |
-| `llm_review` | 静态批次、待复核用例、文件绝对路径列表、约束、LLM开关 | 模型批次，跳过或调用／格式失败时返回静态批次 |
-| `validate_llm_result` | 候选批次、静态批次、待复核用例、约束、LLM开关 | 校验通过的批次，跳过或模型结果违规时返回静态批次 |
+### 共享配置
 
-静态分析内部负责覆盖、安全合批和快照检查，不经过模型结果校验；复核列表不受开关影响，关闭模型或没有待复核用例时，不读取复核原文、不调用模型、不执行模型结果校验
+在仓库根目录的 `default.yaml` 中配置数据集、翻译对和上游服务
 
-约束包含 `before`、`together` 和用于重现共享初始化检查的 `context`；`snapshot` 仅用于程序核对原文及文件清单，不发送给模型，不增加公开输出字段，也不依赖最近一次调用的隐藏状态
-
-模型结果违规时回退静态批次；原文件变化导致静态基准失效时仍明确报错，不将过期静态结果作为可用回退
-
-LLM 输入为完整静态批次、待复核用例列表、相关测试文件原文及约束；不提供文件读取工具，仅在开关开启且列表非空时调用，回复必须是同格式完整批次字典
-
-程序检查覆盖、重复、固定用例位置及动态限制，调用或校验失败记录日志并保留静态结果
-
-主流程调用图
-
-```text
-Localization.plan_tests(翻译对, 仓库名, LLM开关)
-  └─ test_plan.plan_tests(...)
-       │
-       ├─ static_analysis(...)
-       │    read_public(...) → parser.parse(...) → static_batches(...)
-       │    读取公测并静态分批，得到批次字典、待复核用例、文件路径和约束
-       │
-       ├─ llm_review(...)
-       │    输入静态批次、待复核用例、文件路径、约束和LLM开关
-       │    核对快照并读取完整原文，组织提示词，再调用 _call_model(...)
-       │    模型配置统一从项目根目录.env读取，返回候选批次
-       │    关闭LLM、没有待复核用例或调用失败时返回静态批次
-       │
-       └─ validate_llm_result(...)
-            检查模型输出的用例覆盖及批次约束，违规时回退静态批次
-            → 返回 {批次编号: 本批新增测试用例列表}
+```yaml
+dataset:
+  path: D:/dataset
+  source_lang: Java
+  target_lang: Python
+codegraph:
+  base_url: http://127.0.0.1:3000
+  timeout_seconds: 120
+localization:
+  llm_enabled: false
 ```
 
-## 组装功能：累计测试文件
+主流程读取后，将配置直接传入 `Localization(config)`，实例绑定配置中的翻译对，地址、超时和LLM开关均按配置取值
 
-`locator.assemble_tests(batches, test_directories, output_dir=...)` 根据接口1的批次字典，生成各轮累计测试文件
+### 调用三个功能
 
-| 输入 | 说明 |
-|---|---|
-| `batches` | 接口1返回的批次字典，批次从1连续编号，所有用例在输入中各出现一次 |
-| `test_directories` | 原公测目录的绝对路径，可传单个目录或目录列表，多个目录彼此独立 |
-| `output_dir` | 输出根目录的绝对路径，指定位置须尚未存在，且与原公测目录相互独立 |
-
-以下示例复用已创建的 `locator`，目标语言与上游服务地址取实例配置
+独立调用时读取同一份 `default.yaml`，示例中的仓库名 `sample` 和源函数名 `run` 应替换为实际名称
 
 ```python
-batches = locator.plan_tests("Java_to_Python", "sample", use_llm=False)
+from localization import Localization
+from localization.config import load_config
+
+config = load_config("default.yaml")
+locator = Localization(config)
+
+# 接口1，获取每批新增测试用例
+batches = locator.plan_tests("Java_to_Python", "sample", use_llm=config["localization"]["llm_enabled"])
+
+# 组装，使用接口1结果生成各轮累计测试文件
 rounds = locator.assemble_tests(
     batches,
     ["D:/dataset/Java_to_Python/sample/target_project/public_tests"],
     output_dir="D:/runs/sample_rounds",
 )
+
+# 接口2，按源函数名查找完整所属类和依赖
+source = locator.extract_source("sample", "Java", ["run"])
 ```
 
-返回值为 `{批次编号: 修改后的测试文件绝对路径列表}`，每个列表包含该轮累计用例所在的测试文件
+| 调用 | 输入 | 返回值 |
+| --- | --- | --- |
+| `plan_tests(translation_pair, repository_name, use_llm)` | 翻译对、仓库目录名、LLM开关 | `{批次编号: 本批新增测试用例列表}` |
+| `assemble_tests(batches, test_directories, *, output_dir=None)` | 接口1结果、一个或多个原公测目录、输出目录 | `{批次编号: 本轮累计测试文件绝对路径列表}` |
+| `extract_source(repository_name, source_language, function_names)` | 仓库目录名、源语言、源函数名或限定名的字符串列表 | 入口源码范围、项目内依赖范围、外部依赖记录 |
 
-两批用例都在 `test_x.py` 中时，返回形式如下
+`plan_tests` 的结果可直接交给 `assemble_tests`，`extract_source` 由调用方提供相应源函数名
+
+本地检查脚本默认读取 `default.yaml`，结果保存到 `dev/localization/output`
+
+```powershell
+python -B dev/localization/check_interfaces.py plan --repo sample
+python -B dev/localization/check_interfaces.py assemble --repo sample
+python -B dev/localization/check_interfaces.py source --repo sample --functions run
+```
+
+启用LLM时，在仓库根目录 `.env` 配置模型
+
+```dotenv
+LLM_ENDPOINT=https://your-provider.example/v1/chat/completions
+LLM_MODEL=your-model
+LLM_API_KEY=your-key
+LLM_TIMEOUT_SECONDS=120
+LLM_TEMPERATURE=0
+LLM_MAX_OUTPUT_TOKENS=2048
+```
+
+以上六项为必填，`LLM_THINKING` 可选，仅在开启LLM且存在待复核用例时读取并调用模型
+
+## 接口1：测试分批
+
+输出示例
 
 ```python
 {
-    1: ["D:/runs/sample_rounds/round_001/target_project/public_tests/test_x.py"],
-    2: ["D:/runs/sample_rounds/round_002/target_project/public_tests/test_x.py"],
+    1: [{"filePath": "public_tests/test_service.py", "name": "test_basic", "startLine": 4}],
+    2: [{"filePath": "public_tests/test_service.py", "name": "test_combined", "startLine": 8}],
 }
 ```
 
-| 组装规则 | 行为 |
-|---|---|
-| 累计保留用例 | 第1轮保留第1批，第2轮保留第1和第2批，后续依次累计 |
-| 屏蔽未来用例 | Python在未来用例的完整声明位置用空白与 `pass` 占位，其他目标语言使用空白占位，保持字节长度和换行位置 |
-| 保留测试上下文 | 每轮从原公测复制helper、fixture、参数数据、辅助类型和资源，并保留目录结构 |
-| 安全合批 | 共享初始化或测试间调用导致前批提前需要后批功能时，合并受影响的批次，输出按实际轮次重新编号 |
-| 产物发布 | 先在暂存目录生成并核验所有轮次，再一次性发布到输出根目录，原公测用于快照一致性检查 |
-
-输出根目录下按 `round_001/target_project/原公测相对路径`、`round_002/target_project/原公测相对路径` 保存各轮文件，辅助代码和资源位于对应轮次目录中
-
-独立函数可以自动识别单一目标语言，也可通过 `language` 指定；默认输出到独立临时目录，目录保留供调用方使用，调用方使用完毕后负责清理
-
-```python
-from localization.assembly import assemble_tests
-
-rounds = assemble_tests(
-    batches,
-    ["D:/dataset/Java_to_Python/sample/target_project/public_tests"],
-    output_dir="D:/runs/standalone_rounds",
-    language="Python",
-    graph=locator.graph,
-)
-```
-
-上游服务须能访问原公测和生成目录，语法分析用于确认累计用例及保留正文，实际编译和运行还需要配套的目标业务实现、构建配置及依赖
-
-主流程调用图
+路径相对于 `target_project`，批次从1连续编号，每批非空，每个用例只出现一次
 
 ```text
-Localization.assemble_tests(批次字典, 原公测目录, output_dir=输出根目录)
+Localization.plan_tests(...)
+  └─ test_plan.plan_tests(...)
+       ├─ static_analysis(...)
+       │    静态分批 → 批次字典、待复核用例、文件路径和约束
+       │
+       ├─ llm_review(...)
+       │    按开关及待复核列表决定是否调用模型
+       │    提交静态批次、待复核用例、完整文件原文和约束 → 候选批次
+       │
+       └─ validate_batches(静态批次, LLM批次, review_cases, constraints, use_llm)
+            检查静态基准，再按条件检查模型结果 → 最终批次字典
+```
+
+检查覆盖、重复、先后、同批及共享初始化约束，模型还须保持非复核用例的原批次，静态基准无效时记录原因并报错，模型调用或结果无效时回退静态批次
+
+## 组装：累计测试文件
+
+返回示例
+
+```python
+{
+    1: ["D:/runs/sample_rounds/round_001/target_project/public_tests/test_service.py"],
+    2: ["D:/runs/sample_rounds/round_002/target_project/public_tests/test_service.py"],
+}
+```
+
+- 第1轮保留第1批，第2轮保留第1、2批，后续累计
+- Python未来用例使用空白与 `pass` 占位，Java、C#、C++、Rust使用空白占位，保持换行及字节位置
+- 每轮保留辅助代码、参数数据与资源，沿用原目录结构
+- 共享初始化或测试间调用影响拆分时合并批次，按实际轮次编号
+
+`test_directories` 使用绝对路径，可传单个目录或目录列表，多个目录须彼此独立，批次字典须覆盖这些目录的全部用例
+
+`output_dir` 须为尚未存在的绝对路径，与原公测目录相互独立，省略时生成临时输出目录，由调用方使用完后清理
+
+返回列表包含本轮累计用例所在的测试文件，辅助文件保存在对应轮次目录，运行时将该轮公测目录覆盖到已有目标工程副本，使用配套业务实现、构建配置和依赖执行测试
+
+```text
+Localization.assemble_tests(...)
   └─ assembly.assemble_tests(...)
-       │
        ├─ public_bundle(...) → parser.parse(...)
-       │    读取原公测快照，识别全部用例、辅助定义和共享上下文
-       │
+       │    读取原公测并识别用例与上下文
        ├─ coalesce_batches(...)
-       │    检查共享初始化及测试间调用，必要时合并批次
-       │
-       ├─ 循环处理各批次，累加本轮应保留的用例
-       │    ├─ without_future_tests(...)
-       │    │    屏蔽未来用例，将累计测试及辅助资源写入本轮暂存目录
-       │    │
-       │    └─ verifier.parse(...)
-       │         重新解析本轮文件，核对语法和累计用例清单
-       │         主流程同时逐字节核对保留用例正文
-       │
+       │    合并无法安全拆开的批次
+       ├─ 逐批累计 → without_future_tests(...) → verifier.parse(...)
+       │    屏蔽未来用例，核对语法、累计用例及保留正文
        └─ unchanged(...) → os.rename(...)
-            核对原公测快照，发布已核验的全部轮次
-            → 返回 {批次编号: 修改后的测试文件绝对路径列表}
+            核对原件，发布文件并返回路径
 ```
 
 ## 接口2：源码范围与依赖
 
-`locator.extract_source(仓库名, 源语言, 函数名列表)` 返回
+返回示例
 
 ```python
 {
-    "entry_units": [{"filePath": "service.py", "name": "service.Service", "startLine": 5, "endLine": 30}],
+    "entry_units": [
+        {"filePath": "Service.java", "name": "Service", "startLine": 3, "endLine": 20},
+    ],
     "dependencies": {
-        "project": [],
-        "external": [{"name": "requests", "import": "import requests", "filePath": "service.py", "startLine": 1}]
-    }
+        "project": [
+            {"filePath": "Repository.java", "name": "Repository", "startLine": 1, "endLine": 12},
+        ],
+        "external": [],
+    },
 }
 ```
 
-位置相对于 `source_project`，行号从 1 开始且包含结束行；默认保留完整所属类或独立函数，跨文件实现及必要导入上下文使用多个片段，不将结果列表直接视作翻译顺序
+`entry_units` 为入口函数所属的完整类或独立函数，`dependencies.project` 为项目内依赖范围，`dependencies.external` 为外部库名称、原始导入语句及位置
 
-外部库不附实现；无明确导入语句的外部引用使用空 `import`，不编造导入；未解析引用只记录诊断，不直接归为外部库
+路径相对于 `source_project`，行号从1开始且包含结束行，跨文件实现及必要导入可能对应多个片段，调用方按范围读取原文
 
-业务实现集中于 `source_extract.py`（主流程）和 `source_analysis.py`（补充分析）；参数错误、缺失、歧义和预期提取失败记录日志并返回 `{}`，调用方须检查空结果，程序错误继续抛出
-
-接口2主流程使用 `initialize` / `sync`、`getAllFunctions`、`getLocation`、`getContent`、`getDependencies`、`getCallees`，不调用 `getSourceUnit` 或 `getTestAnalysis`
+函数名按符号名称或限定名匹配，参数错误、入口缺失、歧义及预期提取失败会记录原因并返回 `{}`，调用方须检查空结果
 
 ```text
-Localization.extract_source(仓库名, 源语言, 函数名列表)
+Localization.extract_source(...)
   └─ source_extract.extract_source(...)
-       │
        ├─ graph.prepare(...) → graph.functions(...)
-       │    根据绑定翻译对确定源工程，同步索引并取得函数和方法清单
-       │
+       │    同步索引，取得源函数与方法清单
        ├─ build_inventory(...) → external_imports(...)
-       │    补充语法分析，建立符号、精确源码范围、引用和外部导入信息
-       │
+       │    建立符号、源码范围、引用和导入信息
        ├─ 匹配入口 → graph.location(...) / graph.content(...)
-       │    按名称或限定名匹配函数，核对所属类和源码，合并同类入口
-       │
-       ├─ 循环处理尚未访问的源码单元
-       │    ├─ parser.expand_unit(...) → parser.scan_dependencies(...)
-       │    │    补齐完整类及跨文件片段，扫描必要上下文和项目内外依赖
-       │    │
-       │    └─ graph.location(...) / graph.content(...)
-       │         → graph.call("getDependencies", ...) / graph.callees(...)
-       │         核对上游类型及调用依赖，将新确认的项目内依赖加入队列
-       │    直到没有新的源码单元需要处理
-       │
-       ├─ unit_ranges(...)
-       │    整理并去重入口、依赖的源码位置及外部导入记录
-       │
-       └─ graph.content(...) → validate_inventory(...)
-            核对文件原文和源码快照
-            → 返回 entry_units 与 dependencies.project / dependencies.external
+       │    核对所属类与原文
+       ├─ 循环处理待扫描单元
+       │    parser.expand_unit(...) → parser.scan_dependencies(...)
+       │    → graph.location(...) / graph.content(...)
+       │    → graph.call("getDependencies", ...) / graph.callees(...)
+       │    补齐完整类及跨文件实现，将新确认依赖加入队列
+       └─ unit_ranges(...) → graph.content(...) → validate_inventory(...)
+            整理源码范围，核对原文并返回结果
 ```
 
-语法补充使用项目已有的Tree-sitter依赖；只对源工程执行，接口1使用基础HTTP查询，并在本地补充测试框架和数据流信息
+上游HTTP提供节点、归属、调用、依赖和源码查询，本地AST／Tree-sitter补充框架语义、数据流、完整声明范围及跨文件实现关联
 
-
-## 配置与功能检查
-
-实例绑定配置中的翻译对，数据集根目录取 `dataset.path`，上游地址取 `codegraph.base_url`，模型配置统一读取项目根目录 `.env`
-
-两个接口及组装仅使用基础HTTP查询，不调用 `getTestAnalysis` 或 `getSourceUnit`；基础查询未提供的测试框架、隐式依赖、数据流和完整声明范围由本地Tree-sitter补充
-
-```powershell
-.\.venv\Scripts\python.exe -B -m pytest -q -p no:cacheprovider dev/localization/tests/current
-```
-
-该检查仅创建合成代码片段并使用隔离的上游服务，模型响应由桩提供，不读取数据集仓库、不调用真实 LLM
-
-## 独立包配置
-
-```python
-from localization import Localization
-
-locator = Localization({
-    "dataset": {"path": "D:/dataset", "source_lang": "Java", "target_lang": "Python"},
-    "codegraph": {"base_url": "http://127.0.0.1:3000", "timeout_seconds": 120},
-})
-batches = locator.plan_tests("Java_to_Python", "sample", use_llm=False)
-rounds = locator.assemble_tests(batches, ["D:/dataset/Java_to_Python/sample/target_project/public_tests"],
-                                output_dir="D:/runs/sample")
-source = locator.extract_source("sample", "Java", ["run"])
-```
-
-Python客户端与CodeGraph服务需要访问同一份工程文件；`projectRoot` 使用服务所在机器可访问的绝对路径
-
-`.env` 沿用 `LLM_ENDPOINT`、`LLM_MODEL`、`LLM_API_KEY`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_OUTPUT_TOKENS`、`LLM_TEMPERATURE` 和可选 `LLM_THINKING`；程序按需读取，不在导入、关闭LLM时读取密钥
-
-接口1和组装通过 `getAllFunctions`、`getLocation`、`getCallees` 和 `getContent` 复用原生节点、归属、调用与原文；本地补充fixture、参数化、生命周期、对象传递及共享初始化信息，接口2另外使用 `getDependencies` 查询类级依赖
-
-## 文件结构与职责
+## 文件结构
 
 ```text
 localization/
-├─ README.md              接口说明、调用示例、主流程和文件职责
-├─ __init__.py            包入口，导出 Localization
-├─ api.py                 对外入口，绑定配置并提供测试规划、组装和源码提取方法
-├─ config.py              语言映射与解析器路由、仓库路径校验、公测目录发现
-├─ codegraph.py           上游HTTP客户端，封装索引、节点、原文和依赖查询
-├─ test_plan.py           接口1主流程，静态分批、安全合批和模型结果校验
-├─ test_analysis.py       接口1与组装共享的公测快照、测试识别、辅助代码及数据流分析
-├─ llm.py                 接口1的原文读取、复核提示词、.env配置、模型调用及回复解析
-├─ assembly.py            组装主流程，逐批生成累计测试副本、核验并发布文件
-├─ source_extract.py      接口2主流程，匹配入口、循环补齐依赖并返回源码范围
-├─ source_analysis.py     源码语法解析、符号匹配、完整类与跨文件片段及依赖分析
-├─ source_text.py         共享源码解码、行号与字节范围、原文核验及诊断函数
-├─ ordering.py            压缩循环依赖，按依赖先后划分接口1的批次层次
-└─ models.py              内部数据记录，描述位置、用例、源码单元、依赖及诊断
+├─ README.md              调用说明、返回结构和主流程
+├─ __init__.py            导出 Localization
+├─ api.py                 三个功能的公开入口与实例配置
+├─ config.py              共享配置读取、语言路由、数据集路径与公测目录发现
+├─ codegraph.py           上游HTTP客户端与请求内查询缓存
+├─ test_plan.py           静态分批、安全合批及统一批次校验
+├─ test_analysis.py       公测识别、辅助代码、数据流及文件快照
+├─ llm.py                 复核原文读取、提示词、模型配置与调用
+├─ assembly.py            累计测试文件生成、核验及发布
+├─ source_extract.py      入口匹配、依赖遍历与源码范围输出
+├─ source_analysis.py     源码解析、完整单元、跨文件实现与依赖分析
+├─ source_text.py         源码解码、位置换算、原文核验及诊断
+├─ ordering.py            循环依赖合并与依赖排序
+└─ models.py              用例、位置、源码单元及诊断的数据结构
 ```

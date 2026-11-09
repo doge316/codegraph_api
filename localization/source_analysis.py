@@ -4,13 +4,15 @@ import json
 import os
 import sys
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from .codegraph import CodeGraph, GraphError
-from .models import *
+from .codegraph import CodeGraph
+from .config import load_config
+from .models import (
+    DependencyScan, ExternalDependency, InternalDependency, Location, ParsedFile,
+    Reference, ResourceReference, SourceInventory, SourceSymbol, SourceUnit, stable_id,
+)
 from .source_text import SourceText, CALL_KINDS, TYPE_KINDS, covers, diagnostic, checked_content, location, key_id
-from pathlib import PurePosixPath
-from .models import Reference, SourceUnit, stable_id
 
 class PythonSourceRules:
     def _import_references(self, ref):
@@ -252,9 +254,6 @@ class SourceBaseRoute:
         self.partial_names: set[str] = set()
         self.external_roots: set[str] = set()
 
-    def _failed(self, file_path, raw, error):
-        return ParsedFile(file_path, hashlib.sha256(raw).hexdigest(), (), (), (), (diagnostic('PARSE_ERROR', str(error)),))
-
     def _symbol(self, source, name, qualified, kind, owner, start, end, signature=None):
         location = source.location(start, end)
         identity = stable_id(self.language, source.file_path, qualified, kind, signature, start, end)
@@ -404,7 +403,7 @@ class UpstreamSource(SourceRules, SourceBaseRoute):
     def __init__(self, language, graph=None):
         super().__init__()
         self.language, self.extensions = language, EXTENSIONS[language]
-        self.graph = graph or CodeGraph({})
+        self.graph = graph if graph is not None else CodeGraph(load_config()["codegraph"])
         self.root = None
         self.metadata, self.metadata_by_location, self.file_initialization = {}, {}, {}
         self.initialization_contents, self.reference_metadata, self.namespaces = {}, {}, {}

@@ -1,0 +1,9 @@
+dataset:
+  path: D:/dataset
+  source_lang: Java
+  target_lang: Python
+codegraph:
+  base_url: http://127.0.0.1:3000
+  timeout_seconds: 120
+localization:
+  llm_enabled: false

@@ -2,7 +2,6 @@ node_modules/
 .codegraph/
 coverage/
 /design.md
-/localization.dev.yaml
 /dev/localization/
 /.venv/
 __pycache__/

@@ -1,4 +1,4 @@
-"""总配置与数据集位置；不读取YAML，不猜测当前翻译对。"""
+"""共享配置读取、语言路由与数据集位置。"""
 from pathlib import Path
 
 ALIASES = {"python": "Python", "java": "Java", "c#": "C#", "csharp": "C#",
@@ -7,6 +7,11 @@ SDK_LANGUAGES = {"Python": "python", "Java": "java", "C#": "csharp", "C++": "cpp
 PAIRS = {"C#_to_Java", "C++_to_Python", "Java_to_C#", "Java_to_Python",
          "Python_to_C++", "Python_to_Java", "Python_to_Rust"}
 SKIP = {".git", ".codegraph", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".ruff_cache", "target", "bin", "obj"}
+
+
+def load_config(path="default.yaml"):
+    import yaml
+    return yaml.safe_load(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def language(value):

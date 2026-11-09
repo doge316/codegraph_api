@@ -16,9 +16,12 @@ def load_model_settings(env_file=None):
     """固定项目根目录读取.env；进程变量优先，不修改全局环境。"""
     from dotenv import dotenv_values
     values = {**dotenv_values(env_file or ENV_FILE, encoding='utf-8-sig', interpolate=False), **os.environ}
-    endpoint, model, key = (values.get(n) for n in ('LLM_ENDPOINT', 'LLM_MODEL', 'LLM_API_KEY'))
-    if not all(isinstance(v, str) and v.strip() for v in (endpoint, model, key)):
-        raise ValueError('.env需要LLM_ENDPOINT、LLM_MODEL和LLM_API_KEY')
+    required = ('LLM_ENDPOINT', 'LLM_MODEL', 'LLM_API_KEY',
+                'LLM_TIMEOUT_SECONDS', 'LLM_TEMPERATURE', 'LLM_MAX_OUTPUT_TOKENS')
+    missing = [name for name in required if not isinstance(values.get(name), str) or not values[name].strip()]
+    if missing:
+        raise ValueError('.env缺少配置：' + '、'.join(missing))
+    endpoint, model, key = (values[n] for n in required[:3])
     from urllib.parse import urlsplit
     url = urlsplit(endpoint)
     if url.scheme not in {'http', 'https'} or not url.netloc:
@@ -26,9 +29,9 @@ def load_model_settings(env_file=None):
     if url.path.rstrip('/') in {'', '/v1'}:
         from urllib.parse import urlunsplit
         endpoint = urlunsplit(url._replace(path=url.path.rstrip('/') + '/chat/completions'))
-    timeout = float(values.get('LLM_TIMEOUT_SECONDS') or 120)
-    temperature = float(values.get('LLM_TEMPERATURE') or 0)
-    max_tokens = int(values.get('LLM_MAX_OUTPUT_TOKENS') or 2048)
+    timeout = float(values['LLM_TIMEOUT_SECONDS'])
+    temperature = float(values['LLM_TEMPERATURE'])
+    max_tokens = int(values['LLM_MAX_OUTPUT_TOKENS'])
     if not math.isfinite(timeout) or timeout <= 0 or not math.isfinite(temperature) or not 0 <= temperature <= 2 or max_tokens <= 0:
         raise ValueError('LLM超时、温度或输出Token上限不合法')
     thinking = values.get('LLM_THINKING')

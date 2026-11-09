@@ -1,8 +1,8 @@
 """解析器共享的数据记录；对外接口返回普通字典，不维护序列化协议。"""
 from __future__ import annotations
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 import hashlib
 import json
 
@@ -11,17 +11,11 @@ UnitKind = str
 DependencyKind = str
 Origin = str
 
-class Model:
-    def to_dict(self):
-        return asdict(self)
-    def to_json(self):
-        return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True, default=str)
-
 def stable_id(*parts):
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 @dataclass(frozen=True)
-class Location(Model):
+class Location:
     file_path: str
     start_line: int
     end_line: int
@@ -29,7 +23,7 @@ class Location(Model):
     end_byte: int
 
 @dataclass(frozen=True)
-class Diagnostic(Model):
+class Diagnostic:
     code: str
     message: str
     location: Location | None = None
@@ -38,20 +32,20 @@ class Diagnostic(Model):
     candidates: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
-class PublicFile(Model):
+class PublicFile:
     relative_path: str
     content_bytes: bytes
     sha256: str
     role: Literal['test', 'helper', 'resource']
 
 @dataclass(frozen=True)
-class PublicBundle(Model):
+class PublicBundle:
     root: Path
     files: tuple[PublicFile, ...]
     input_hash: str
 
 @dataclass(frozen=True)
-class SupportUnit(Model):
+class SupportUnit:
     unit_id: tuple[str, str, int]
     name: str
     container: str
@@ -61,7 +55,7 @@ class SupportUnit(Model):
     parameters: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
-class TestCase(Model):
+class TestCase:
     __test__ = False
     case_id: tuple[str, str, int]
     file_path: str
@@ -74,7 +68,7 @@ class TestCase(Model):
     runtime_selector: str
 
 @dataclass(frozen=True)
-class ParsedTests(Model):
+class ParsedTests:
     __test__ = False
     framework: str
     cases: tuple[TestCase, ...]
@@ -82,7 +76,7 @@ class ParsedTests(Model):
     diagnostics: tuple[Diagnostic, ...] = ()
 
 @dataclass(frozen=True)
-class SourceSymbol(Model):
+class SourceSymbol:
     symbol_id: str
     graph_node_id: str | None
     name: str
@@ -93,13 +87,13 @@ class SourceSymbol(Model):
     locations: tuple[Location, ...]
 
 @dataclass(frozen=True)
-class SourceFragment(Model):
+class SourceFragment:
     location: Location
     source: str
     file_sha256: str
 
 @dataclass(frozen=True)
-class SourceUnit(Model):
+class SourceUnit:
     unit_id: str
     kind: UnitKind
     language: SourceLanguage
@@ -110,35 +104,27 @@ class SourceUnit(Model):
     reason: str
 
 @dataclass(frozen=True)
-class DependencyEdge(Model):
-    source_unit_id: str
-    target_unit_id: str
-    kind: DependencyKind
-    evidence: Location
-    origin: Origin
-
-@dataclass(frozen=True)
-class ExternalDependency(Model):
+class ExternalDependency:
     name: str
     version: str | None
     evidence: Location
 
 @dataclass(frozen=True)
-class ResourceReference(Model):
+class ResourceReference:
     path: str | None
     expression: str
     exists: bool | None
     evidence: Location
 
 @dataclass(frozen=True)
-class Reference(Model):
+class Reference:
     spelling: str
     kind: str
     scope_id: str | None
     location: Location
 
 @dataclass(frozen=True)
-class ParsedFile(Model):
+class ParsedFile:
     file_path: str
     sha256: str
     symbols: tuple[SourceSymbol, ...]
@@ -147,7 +133,7 @@ class ParsedFile(Model):
     diagnostics: tuple[Diagnostic, ...]
 
 @dataclass(frozen=True)
-class SourceInventory(Model):
+class SourceInventory:
     repo_root: Path
     language: SourceLanguage
     files: dict[str, ParsedFile]
@@ -156,14 +142,14 @@ class SourceInventory(Model):
     diagnostics: tuple[Diagnostic, ...]
 
 @dataclass(frozen=True)
-class InternalDependency(Model):
+class InternalDependency:
     target: SourceSymbol
     kind: DependencyKind
     evidence: Location
     origin: Origin
 
 @dataclass(frozen=True)
-class DependencyScan(Model):
+class DependencyScan:
     internal_dependencies: tuple[InternalDependency, ...]
     external_dependencies: tuple[ExternalDependency, ...]
     resources: tuple[ResourceReference, ...]
