@@ -90,7 +90,22 @@ LLM_TEMPERATURE=0
 LLM_MAX_OUTPUT_TOKENS=2048
 ```
 
-以上六项为必填，`LLM_THINKING` 可选，仅在开启LLM且存在待复核用例时读取并调用模型
+以上六项为必填，`LLM_THINKING` 可选，接口1在启用LLM且存在待复核用例时调用模型，组装在 `localization.llm_enabled` 开启时逐轮调用模型
+
+## 共享测试分析
+
+`analyze_tests(test_directories, language, graph)` 接收一个或多个公测目录、目标语言和上游HTTP客户端，返回同一文件快照上的分析字典
+
+| 输出项 | 内容 |
+| --- | --- |
+| `cases` | 用例标识、完整声明位置、被测接口及调用信息 |
+| `units` | 测试、fixture、helper、参数数据、导入、初始化和作用域的原文及位置 |
+| `evidence` | 代码单元之间的引用、fixture注入和生命周期关联，包含原文位置、触发阶段和确认情况 |
+| `files` | 源码文件原文、编码及资源内容 |
+| `layouts` | 类、模块等作用域的拼接信息 |
+| `snapshot`、`diagnostics` | 输入文件快照和解析诊断 |
+
+接口1使用用例涉及的功能和调用关系进行分批，组装沿引用关系选择当前累计用例所需代码，各自生成分批约束和组装约束
 
 ## 接口1：测试分批
 
@@ -108,18 +123,22 @@ LLM_MAX_OUTPUT_TOKENS=2048
 ```text
 Localization.plan_tests(...)
   └─ test_plan.plan_tests(...)
-       ├─ static_analysis(...)
-       │    静态分批 → 批次字典、待复核用例、文件路径和约束
+       ├─ analyze_tests(公测目录, 目标语言, graph)
+       │    读取公测并建立共享的用例、代码单元和引用证据
        │
-       ├─ llm_review(...)
-       │    按开关及待复核列表决定是否调用模型
-       │    提交静态批次、待复核用例、完整文件原文和约束 → 候选批次
+       ├─ static_analysis(analysis)
+       │    静态分批 → 批次字典、待复核用例、完整文件路径和约束
+       │
+       ├─ llm_review(静态批次, 待复核用例, paths, constraints, use_llm)
+       │    按开关读取完整文件原文并提交模型 → 候选批次
        │
        └─ validate_batches(静态批次, LLM批次, review_cases, constraints, use_llm)
-            检查静态基准，再按条件检查模型结果 → 最终批次字典
+            检查静态基准及模型结果 → 最终批次字典
 ```
 
-检查覆盖、重复、先后、同批及共享初始化约束，模型还须保持非复核用例的原批次，静态基准无效时记录原因并报错，模型调用或结果无效时回退静态批次
+LLM输入包含静态批次、待复核用例、程序读取的完整测试源码和分批约束，关闭LLM或没有待复核用例时使用静态结果
+
+校验覆盖、重复、先后、同批及加载约束，模型须保持非复核用例的原批次，静态基准无效时报错，模型调用或结果无效时回退静态批次
 
 ## 组装：累计测试文件
 
@@ -132,29 +151,46 @@ Localization.plan_tests(...)
 }
 ```
 
-- 第1轮保留第1批，第2轮保留第1、2批，后续累计
-- Python未来用例使用空白与 `pass` 占位，Java、C#、C++、Rust使用空白占位，保持换行及字节位置
-- 每轮保留辅助代码、参数数据与资源，沿用原目录结构
-- 共享初始化或测试间调用影响拆分时合并批次，按实际轮次编号
+每轮从累计用例出发，递归添加必要的fixture、helper、参数数据、导入、初始化及类或模块结构，按原声明顺序拼接文件
 
-`test_directories` 使用绝对路径，可传单个目录或目录列表，多个目录须彼此独立，批次字典须覆盖这些目录的全部用例
-
-`output_dir` 须为尚未存在的绝对路径，与原公测目录相互独立，省略时生成临时输出目录，由调用方使用完后清理
-
-返回列表包含本轮累计用例所在的测试文件，辅助文件保存在对应轮次目录，运行时将该轮公测目录覆盖到已有目标工程副本，使用配套业务实现、构建配置和依赖执行测试
+未来用例及其专用初始化在需要的轮次加入，conftest中的fixture按用例关联加入并保留框架配置与钩子，Python导入可按本轮需要保留导入项，无法安全拆开的测试调用和不透明上下文会合批，资源按原字节复制
 
 ```text
 Localization.assemble_tests(...)
   └─ assembly.assemble_tests(...)
-       ├─ public_bundle(...) → parser.parse(...)
-       │    读取原公测并识别用例与上下文
-       ├─ coalesce_batches(...)
-       │    合并无法安全拆开的批次
-       ├─ 逐批累计 → without_future_tests(...) → verifier.parse(...)
-       │    屏蔽未来用例，核对语法、累计用例及保留正文
-       └─ unchanged(...) → os.rename(...)
-            核对原件，发布文件并返回路径
+       ├─ analyze_tests(...) → planning_context(...) / coalesce_batches(...)
+       │    分析公测，合并无法安全拆分的批次
+       │
+       ├─ 逐批累计
+       │    ├─ prepare_round(batches, batch_no, previous_files, analysis, target_layout)
+       │    │    选择必要代码并拼接 → 静态文件、模型上下文和组装约束
+       │    │
+       │    ├─ llm_assemble(static_files, context, constraints, use_llm)
+       │    │    可选模型分析 → 完整文件字典
+       │    │
+       │    └─ validate_and_write(static_files, candidate_files, constraints, round_dir, use_llm)
+       │         校验模型结果，失败则校验静态回退 → 写入暂存目录
+       │         读取实际写入的文件，作为下一轮的previous_files
+       │
+       └─ check_snapshot(...) → os.rename(...)
+            核对原公测后一次性发布各轮文件，返回测试文件路径
 ```
+
+| 小接口 | 输入 | 输出 |
+| --- | --- | --- |
+| `prepare_round` | 批次字典、当前轮次、上一轮实际文件、共享分析、目录布局 | `{相对路径: 完整源码}`、模型上下文、组装约束 |
+| `llm_assemble` | 静态文件、模型上下文、组装约束、LLM开关 | `{相对路径: 完整源码}` |
+| `validate_and_write` | 静态文件、候选文件、约束、暂存轮次目录、LLM开关 | 本轮累计测试文件路径列表 |
+
+模型获得静态文件、上一轮实际文件、本轮新增用例、原公测源码、代码单元位置、结构化关联证据和组装约束，返回完整文件字典，由程序校验并写入
+
+校验语法、累计用例清单、测试与辅助代码原文、作用域、必要导入、声明顺序和文件范围，模型失败时使用通过校验的静态文件，两者均无效时终止本次组装并清理暂存结果
+
+`test_directories` 使用绝对路径，可传单个目录或彼此独立的目录列表，批次须覆盖这些目录的全部用例
+
+`output_dir` 须为尚未存在的绝对路径，与原公测目录相互独立，省略时生成临时输出目录，由调用方使用完后清理
+
+返回列表包含本轮累计用例所在文件，辅助文件与资源位于同轮目录，运行时将该轮公测目录覆盖到目标工程副本，使用配套业务实现、构建配置和依赖执行测试
 
 ## 接口2：源码范围与依赖
 
@@ -210,9 +246,9 @@ localization/
 ├─ config.py              共享配置读取、语言路由、数据集路径与公测目录发现
 ├─ codegraph.py           上游HTTP客户端与请求内查询缓存
 ├─ test_plan.py           静态分批、安全合批及统一批次校验
-├─ test_analysis.py       公测识别、辅助代码、数据流及文件快照
+├─ test_analysis.py       共享公测分析、代码单元、引用证据及快照
 ├─ llm.py                 复核原文读取、提示词、模型配置与调用
-├─ assembly.py            累计测试文件生成、核验及发布
+├─ assembly.py            加法组装、模型复核、文件校验及发布
 ├─ source_extract.py      入口匹配、依赖遍历与源码范围输出
 ├─ source_analysis.py     源码解析、完整单元、跨文件实现与依赖分析
 ├─ source_text.py         源码解码、位置换算、原文核验及诊断

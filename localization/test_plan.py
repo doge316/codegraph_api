@@ -1,10 +1,12 @@
 """静态批次、共享上下文合批及可选模型复核。"""
 import logging
 from copy import deepcopy
+from dataclasses import replace
 from types import SimpleNamespace
 
 from .ordering import layers
-from .test_analysis import read_public, reference_identity, case_reference, unchanged, source_snapshot, check_snapshot
+from .test_analysis import (analyze_tests, analysis_cases, reference_identity, case_reference,
+                            check_snapshot, required_units, unit_identity)
 
 logger = logging.getLogger(__name__)
 
@@ -131,37 +133,47 @@ def static_batches(parsed, parser):
     return safe, constraints
 
 
-def static_analysis(service, translation_pair, repository_name):
-    """返回静态批次、待复核用例、相关文件路径和约束，不调用模型。"""
-    from .config import pair_name, repository
-    if pair_name(translation_pair) != service.pair:
-        raise ValueError('请求翻译对与实例绑定的翻译对不一致')
-    repo = repository(service.root, service.pair, repository_name)
-    bundle, roots, parser = read_public(service, repo)
-    parser.public_roots = roots
-    parsed = parser.parse(bundle)
-    if not parsed.cases or any(d.code == 'PARSE_ERROR' for d in parsed.diagnostics):
-        raise ValueError('公有测试为空或无法完整解析')
-    for diagnostic in parsed.diagnostics:
-        logger.warning('%s：%s', diagnostic.code, diagnostic.message)
-    batches, constraints = static_batches(parsed, parser)
+def planning_context(analysis):
+    """仅将无法延迟的加载引用、真实用例调用和不透明区域交给分批器。"""
+    references = set()
+    for unit in analysis['units']:
+        if unit['eager']:
+            references.update(unit['uses'])
+    rows = []
+    for row in analysis['cases']:
+        needed = required_units(analysis, [row['case']])
+        calls = [other['case'] for other in analysis['cases']
+                 if other is not row and unit_identity(other['unit']) in needed]
+        rows.append({'case': row['case'], 'interfaces': row['interfaces'],
+                     'test_calls': calls})
+    return {'references': sorted(references),
+            'opaque': any(unit['kind'] == 'opaque' for unit in analysis['units']), 'cases': rows}
+
+
+def static_analysis(analysis):
+    """共享事实 → 静态批次、待复核用例、完整文件路径和分批约束。"""
+    from pathlib import Path
+    check_snapshot(analysis['snapshot'])
+    cases = analysis_cases(analysis)
+    context = planning_context(analysis)
+    # 沿用已有分组与排序算法，加载约束来自共享分析中的实际代码关联。
+    cases = [replace(case, support_ids=tuple(reference_identity(r) for r in row['test_calls']))
+             for case, row in zip(cases, context['cases'])]
+    parser = SimpleNamespace(calls={case.case_id: row['calls'] for case, row in zip(cases, analysis['cases'])},
+                             context_references=set(context['references']), context_opaque=context['opaque'])
+    batches, constraints = static_batches(SimpleNamespace(cases=cases), parser)
     batches = ordered_batches(batches)
-    known = {case.case_id for case in parsed.cases}
+    known = {case.case_id for case in cases}
     emitted = [reference_identity(ref) for refs in batches.values() for ref in refs]
     if len(emitted) != len(known) or set(emitted) != known:
         raise ValueError('静态批次用例遗漏、重复或标识无效')
-    review = [case_reference(c) for c in parsed.cases if c.case_id in parser.review_cases]
-    paths = [str(bundle.root / f.relative_path) for f in bundle.files
-             if f.relative_path.endswith(parser.extensions)]
-    # 只传递安全检查必需的普通数据，不保留最近一次调用的parser或隐藏状态
-    constraints['context'] = {
-        'references': sorted(parser.context_references), 'opaque': parser.context_opaque,
-        'cases': [{'case': case_reference(c), 'interfaces': list(c.requirements),
-                   'test_calls': [case_reference(other) for other in parsed.cases if other.case_id in c.support_ids]}
-                  for c in parsed.cases],
-    }
-    constraints['snapshot'] = source_snapshot(bundle)
-    unchanged(bundle)
+    review = [row['case'] for row in analysis['cases'] if row['review']]
+    paths = [str(Path(analysis['snapshot']['root']) / file)
+             for file, row in analysis['files'].items() if 'source' in row]
+    constraints['context'] = context
+    constraints['snapshot'] = analysis['snapshot']
+    for diagnostic in analysis['diagnostics']:
+        logger.warning('%s：%s', diagnostic['code'], diagnostic['message'])
     return batches, review, paths, constraints
 
 
@@ -225,8 +237,16 @@ def validate_batches(static_batches, llm_batches, review_cases, constraints, use
 
 
 def plan_tests(service, translation_pair, repository_name, use_llm):
-    """三个主要调用：静态分析 → 可选模型复核 → 统一批次校验。"""
+    """共享测试分析 → 静态分批 → 可选模型复核 → 统一批次校验。"""
+    from .config import pair_name, repository, public_directories
     from .llm import llm_review
-    batches, review, paths, constraints = static_analysis(service, translation_pair, repository_name)
+    if pair_name(translation_pair) != service.pair:
+        raise ValueError('请求翻译对与实例绑定的翻译对不一致')
+    repo = repository(service.root, service.pair, repository_name)
+    target = (repo / 'target_project').resolve(strict=True)
+    if not target.is_relative_to(repo):
+        raise ValueError('target_project路径越界')
+    analysis = analyze_tests(public_directories(target), service.target, service.graph)
+    batches, review, paths, constraints = static_analysis(analysis)
     candidate = llm_review(batches, review, paths, constraints, use_llm)
     return validate_batches(batches, candidate, review, constraints, use_llm)

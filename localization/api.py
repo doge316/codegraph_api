@@ -27,7 +27,8 @@ class Localization:
     def assemble_tests(self, batches, test_directories, *, output_dir=None):
         from .assembly import assemble_tests
         return assemble_tests(batches, test_directories, output_dir=output_dir,
-                              language=self.target, graph=self.graph)
+                              language=self.target, graph=self.graph,
+                              use_llm=self.config['localization']['llm_enabled'])
 
 
     @request_scope

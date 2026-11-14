@@ -6,9 +6,10 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 import tempfile
+import base64
 
 from .codegraph import CodeGraph, GraphError
-from .config import files_under, public_directories, SDK_LANGUAGES, load_config
+from .config import files_under, public_directories, SDK_LANGUAGES, load_config, language as normalize_language
 from .source_text import SourceText, diagnostic
 from .models import PublicBundle, PublicFile, ParsedTests, TestCase, SupportUnit
 
@@ -53,44 +54,19 @@ def public_bundle(root, roots, extensions):
     return PublicBundle(root, values, digest)
 
 
-def read_public(service, repo):
-    root = (repo / 'target_project').resolve()
-    if not root.is_relative_to(repo.resolve()) or not root.is_dir():
-        raise ValueError('target_project不存在或越界')
-    roots = public_directories(root)
-    parser = UpstreamTests(SDK_LANGUAGES[service.target], service.graph)
-    return public_bundle(root, roots, parser.extensions), roots, parser
-
-
-def unchanged(bundle, roots=None):
-    check_snapshot(source_snapshot(bundle), roots=roots)
-
-
 def source_snapshot(bundle):
     return {'root': str(bundle.root), 'files': {f.relative_path: f.sha256 for f in bundle.files}}
 
 
 def check_snapshot(snapshot, *, roots=None):
     root = Path(snapshot['root'])
-    roots = roots or public_directories(root)
+    roots = roots or [Path(p) for p in snapshot.get('roots', ())] or public_directories(root)
     current = {p.relative_to(root).as_posix(): p for public in roots for p in files_under(public)}
     if set(current) != set(snapshot['files']):
         raise ValueError('SOURCE_CHANGED：公测文件清单变化')
     for name, digest in snapshot['files'].items():
         if hashlib.sha256(current[name].read_bytes()).hexdigest() != digest:
             raise ValueError('SOURCE_CHANGED：公测文件变化：' + name)
-
-
-def without_future_tests(file, future, language):
-    raw = bytearray(file.content_bytes)
-    for case in future:
-        loc = case.location
-        raw[loc.start_byte:loc.end_byte] = bytes(b if b in (10, 13) else 32 for b in raw[loc.start_byte:loc.end_byte])
-        if language == 'Python':
-            if loc.end_byte - loc.start_byte < 4:
-                raise ValueError('无法放入Python占位语句')
-            raw[loc.start_byte:loc.start_byte + 4] = b'pass'
-    return bytes(raw)
 
 
 class UpstreamTests:
@@ -167,6 +143,7 @@ class UpstreamTests:
                         diagnostics.append(diagnostic('GRAPH_SYMBOL_UNRESOLVED', '公测key存在歧义，补充核对完整声明：' + node['name'], blocking=False))
         context = _TestSyntax(self.language, sources, native, graph_calls)
         parsed = context.parse()
+        self.syntax = context
         self.calls, self.review_cases = context.calls, context.review
         self.context_references, self.context_opaque = context.context_references, context.context_opaque
         self.parsed = replace(parsed, diagnostics=tuple(diagnostics) + parsed.diagnostics)
@@ -460,6 +437,8 @@ class _TestSyntax:
 
     def parse(self):
         cases, support = [], {}
+        self.support_links = []
+        self.load_calls = []
         for test in self.tests:
             reasons, selected, interfaces, facts = set(), {}, set(), []
             owners = self._owners(test, reasons)
@@ -647,6 +626,9 @@ class _TestSyntax:
 
             initial={}
             tags='\n'.join([test.tags,*[o.tags for o in owners]])
+            if self.language == 'python':
+                tags += '\n' + '\n'.join(_text(node) for node in self.files[test.file].root_node.named_children
+                                          if re.match(r'pytestmark\s*=', _text(node)))
             parametrize=re.search(r'parametrize\s*\(\s*([\'"])(.*?)\1',tags,re.S)
             parameters={n.strip() for n in parametrize.group(2).split(',')} if parametrize else set()
             for name,typename in _parameters(test.ast):
@@ -673,6 +655,8 @@ class _TestSyntax:
             analyze(test,globals,globals,SimpleNamespace(type='block',named_children=context_nodes,text=b''))
             for fact in facts[start:]:
                 fact['shared']=True
+                if fact not in self.load_calls:
+                    self.load_calls.append(fact.copy())
                 self.context_references.update(fact['consumer'].replace('::','.').split('.'))
             for name,value in globals.items():initial.setdefault(name,value)
             for symbol in self.symbols:
@@ -699,6 +683,7 @@ class _TestSyntax:
                 if any(symbol is t for t in self.tests):ids.append(symbol.case_id)
                 else:
                     key=(symbol.file,symbol.name,symbol.location.start_line)
+                    self.support_links.append((test.case_id, symbol.location, 'uses_fixture' if self._fixture(symbol) else 'lifecycle' if self._lifecycle(symbol) else 'calls_helper'))
                     support[key]=SupportUnit(key,symbol.name,symbol.owner.qualified if symbol.owner else '',symbol.location,
                                              'fixture' if self._fixture(symbol) or self._lifecycle(symbol) else 'helper')
             self.calls[test.case_id]=tuple(f for f in facts if not f.get('shared'))
@@ -722,3 +707,358 @@ class _TestSyntax:
             raise ValueError('同一用例标识或测试选择器对应多个定义')
         return ParsedTests({'python':'pytest','java':'junit','csharp':'xunit','cpp':'gtest','rust':'cargo'}[self.language],
                            tuple(cases),tuple(support.values()),tuple(self.diagnostics))
+
+
+def unit_reference(unit):
+    return {key: unit[key] for key in ('filePath', 'startByte', 'endByte')}
+
+
+def unit_identity(ref):
+    return ref['filePath'], ref['startByte'], ref['endByte']
+
+
+def analysis_cases(analysis):
+    from .models import Location
+    return [TestCase(reference_identity(row['case']), row['case']['filePath'], row['container'],
+                     row['case']['name'], Location(row['case']['filePath'], **row['location']),
+                     row['parameterization'], tuple(row['interfaces']),
+                     tuple(reference_identity(ref) for ref in row['test_calls']), row['selector'])
+            for row in analysis['cases']]
+
+
+def analyze_tests(test_directories, language, graph):
+    """读取同一公测快照，输出可序列化的代码单元、引用证据和用例事实。"""
+    name = normalize_language(language)
+    directories = [test_directories] if isinstance(test_directories, (str, Path)) else list(test_directories)
+    directories = list(dict.fromkeys(Path(p).resolve(strict=True) for p in directories))
+    if not directories or any(not p.is_dir() for p in directories):
+        raise ValueError('须提供原公测目录')
+    if any(a != b and a.is_relative_to(b) for a in directories for b in directories):
+        raise ValueError('测试目录不能相互嵌套')
+    import os
+    root = Path(os.path.commonpath(directories))
+    if root in directories:
+        root = root.parent
+    root = next((p for p in [root, *root.parents] if p.name == 'target_project'), root)
+    parser = UpstreamTests(SDK_LANGUAGES[name], graph)
+    parser.public_roots = directories
+    bundle = public_bundle(root, directories, parser.extensions)
+    parsed = parser.parse(bundle)
+    if not parsed.cases or any(d.code == 'PARSE_ERROR' for d in parsed.diagnostics):
+        raise ValueError('公有测试为空或无法完整解析')
+    syntax = parser.syntax
+    files = {}
+    for file in bundle.files:
+        row = {'role': file.role, 'sha256': file.sha256}
+        if file.relative_path in syntax.sources:
+            source = syntax.sources[file.relative_path]
+            row.update(source=source.text, encoding=source.encoding)
+        else:
+            row['content'] = base64.b64encode(file.content_bytes).decode('ascii')
+        files[file.relative_path] = row
+    units, layouts = _code_units(syntax, parsed)
+    evidence = _unit_evidence(units, syntax)
+    by_range = {unit_identity(unit): unit for unit in units}
+    rows = []
+    for case in parsed.cases:
+        ref = case_reference(case)
+        containing = [u for u in units if u['filePath'] == case.file_path and u['kind'] == 'test' and
+                      u['startByte'] <= case.location.start_byte and case.location.end_byte <= u['endByte']]
+        if len(containing) != 1:
+            # 不透明语法保留整文件，只能整体交付。
+            containing = [u for u in units if u['filePath'] == case.file_path and u['kind'] == 'opaque']
+        if len(containing) != 1:
+            raise ValueError('测试声明无法关联完整代码单元')
+        owner = containing[0]
+        for source_case, target, relation in syntax.support_links:
+            if source_case != case.case_id:
+                continue
+            candidates = [u for u in units if u['filePath'] == target.file_path and
+                          u['startByte'] <= target.start_byte and target.end_byte <= u['endByte']]
+            if candidates:
+                unit = min(candidates, key=lambda u: u['endByte'] - u['startByte'])
+                evidence.append(_link(owner, unit, relation, 'setup' if relation != 'calls_helper' else 'call', True))
+        facts = list(parser.calls.get(case.case_id, ()))
+        loaded = {f['consumer'] for f in syntax.load_calls}
+        interfaces = set(case.requirements) - loaded
+        interfaces.update(f['consumer'] for f in facts)
+        # C++默认构造等类型使用未必有调用事实，沿用原解析器的识别结果。
+        interfaces.update(name for name in case.requirements if name in owner['uses'])
+        rows.append({'case': ref, 'unit': unit_reference(owner), 'container': case.container,
+                     'location': {'start_line': case.location.start_line, 'end_line': case.location.end_line,
+                                  'start_byte': case.location.start_byte, 'end_byte': case.location.end_byte},
+                     'interfaces': sorted(interfaces), 'calls': facts,
+                     'test_calls': [case_reference(c) for c in parsed.cases if c.case_id in case.support_ids],
+                     'parameterization': case.parameterization, 'selector': case.runtime_selector,
+                     'review': case.case_id in parser.review_cases})
+    snapshot = {**source_snapshot(bundle), 'roots': [str(p) for p in directories]}
+    result = {'language': name, 'cases': rows, 'units': units, 'evidence': evidence,
+              'files': files, 'layouts': layouts, 'snapshot': snapshot,
+              'diagnostics': [{'code': d.code, 'message': d.message} for d in parsed.diagnostics]}
+    # 单元的初始化调用只加入实际引用它的用例，避免污染其他用例的功能集合。
+    for row in rows:
+        selected = required_units(result, [row['case']])
+        for key in selected:
+            unit = by_range[key]
+            if unit['kind'] == 'global':
+                row['interfaces'].extend(n for n in unit['calls'] if n not in row['interfaces'])
+        if not row['interfaces']:
+            row['review'] = True
+    check_snapshot(snapshot)
+    return result
+
+
+def _code_units(syntax, parsed):
+    units, layouts = [], {}
+    symbol_ranges = {(s.file, s.location.start_byte, s.location.end_byte): s for s in syntax.symbols}
+    test_ranges = {(c.file_path, c.location.start_byte, c.location.end_byte) for c in parsed.cases}
+    containers = _TEST_TYPES | {'namespace_definition', 'namespace_declaration', 'file_scoped_namespace_declaration', 'mod_item'}
+    for file, tree in syntax.files.items():
+        source = syntax.sources[file]
+        if syntax.context_opaque or tree.root_node.has_error:
+            unit = {'filePath': file, 'startByte': 0, 'endByte': len(source.raw), 'startLine': 1,
+                    'endLine': len(source.raw.splitlines()), 'kind': 'opaque', 'name': '', 'parent': None,
+                    'source': source.text, 'leading': '', 'names': [], 'uses': [], 'calls': [], 'eager': True}
+            units.append(unit)
+            layouts[file] = {'leading': '', 'trailing': ''}
+            continue
+
+        def collect(scope, parent=None, first=0, last=None):
+            cursor = first
+            last = len(source.raw) if last is None else last
+            for node in scope.named_children:
+                loc = syntax._location(file, node)
+                symbol = next((s for (f, a, b), s in symbol_ranges.items() if f == file and
+                               (s.ast == node or s.ast.parent == node)), None)
+                if symbol is not None:
+                    loc = symbol.location
+                elif any(f == file and s.ast.parent == node.parent and
+                         a <= loc.start_byte and loc.end_byte <= b
+                         for (f, a, b), s in symbol_ranges.items()):
+                    # Rust属性等节点已包含在后续函数的完整声明中。
+                    continue
+                if loc.start_byte < cursor:
+                    continue
+                end = loc.end_byte
+                if source.raw[end:end + 1] == b';':
+                    end += 1
+                body_node = symbol.ast if symbol is not None else node
+                body = _field(body_node, 'body')
+                is_container = body is not None and body_node.type in containers
+                kind = 'context'
+                if (file, loc.start_byte, loc.end_byte) in test_ranges:
+                    kind = 'test'
+                elif is_container:
+                    kind = 'container'
+                elif symbol is not None:
+                    kind = 'fixture' if syntax._fixture(symbol) else 'lifecycle' if syntax._lifecycle(symbol) else 'helper'
+                elif re.match(r'import|using|package|use_declaration|preproc_include|file_scoped_namespace_declaration', node.type):
+                    kind = 'import'
+                elif node.type not in {'comment', 'line_comment', 'block_comment', 'attribute_item'}:
+                    kind = 'global'
+                raw = source.raw[loc.start_byte:end]
+                text = raw.decode(source.codec)
+                names, uses = _declared_and_used(syntax.language, text, body_node, kind)
+                unit = {'filePath': file, 'startByte': loc.start_byte, 'endByte': end,
+                        'startLine': loc.start_line, 'endLine': source.raw[:max(loc.start_byte, end - 1)].count(b'\n') + 1,
+                        'kind': kind, 'name': symbol.name if symbol is not None else next(iter(sorted(names)), ''),
+                        'parent': parent, 'source': text, 'leading': source.raw[cursor:loc.start_byte].decode(source.codec),
+                        'names': sorted(names), 'uses': sorted(uses),
+                        'calls': sorted({_text(_field(n, 'function') or _field(n, 'type')) for n in _walk(body_node)
+                                         if n.type in _TEST_CALLS}),
+                        'eager': kind == 'global' and not names}
+                units.append(unit)
+                if kind == 'global':
+                    unit['calls'] = sorted({f['consumer'] for f in syntax.load_calls if
+                                            f['filePath'] == file and loc.start_line <= f['startLine'] <= unit['endLine']})
+                if is_container:
+                    children = body.named_children
+                    start = syntax._location(file, children[0]).start_byte if children else syntax._location(file, body).end_byte - 1
+                    stop = syntax._location(file, body).end_byte - (0 if syntax.language == 'python' else 1)
+                    unit['header'] = source.raw[loc.start_byte:start].decode(source.codec)
+                    unit['footer'] = source.raw[stop:end].decode(source.codec)
+                    unit['tail'] = collect(body, unit_reference(unit), start, stop)
+                    # 类型壳只引用基类和类属性，方法体的引用由对应子单元承担。
+                    header_tree = syntax.syntax.parse((unit['header'] + unit['footer']).encode())
+                    unit['uses'] = sorted({_text(n) for n in _walk(header_tree.root_node)
+                                           if n.type in {'identifier', 'type_identifier', 'namespace_identifier'}} - names)
+                cursor = end
+            return source.raw[cursor:last].decode(source.codec)
+
+        trailing = collect(tree.root_node)
+        layouts[file] = {'leading': '', 'trailing': trailing}
+    return units, layouts
+
+
+def _python_tree(text):
+    """补回声明首行省略的缩进，解析完整装饰器与定义。"""
+    import ast
+    import textwrap
+    definition = re.search(r'^([ \t]*)(?:async\s+def|def|class)\s', text, re.M)
+    margin = definition[1] if definition else ''
+    return ast.parse(textwrap.dedent(margin + text))
+
+
+def _declared_and_used(language, text, node, kind):
+    names = set()
+    uses = {_text(n) for n in _walk(node) if n.type in {'identifier', 'type_identifier', 'field_identifier', 'namespace_identifier'}}
+    if language == 'python':
+        import ast
+        try:
+            parsed = _python_tree(text)
+        except SyntaxError:
+            return names, uses
+        # 完整声明中的装饰器也可能引用参数数据，不能只扫描函数体节点。
+        uses = {n.id for n in ast.walk(parsed) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        uses.update(n.attr for n in ast.walk(parsed) if isinstance(n, ast.Attribute) and
+                    isinstance(n.value, ast.Name) and n.value.id in {'self', 'cls'})
+        for statement in parsed.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(statement.name)
+            elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+                names.update(a.asname or a.name.split('.')[0] for a in statement.names)
+            else:
+                names.update(n.id for n in ast.walk(statement) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+        if kind in {'test', 'helper', 'fixture', 'lifecycle'}:
+            import symtable
+            table = symtable.symtable(ast.unparse(parsed), '<test>', 'exec')
+            children = table.get_children()
+            if children:
+                local = {s.get_name() for s in children[0].get_symbols() if s.is_local() or s.is_parameter()}
+                # fixture参数由框架关联补充，普通局部变量不指向模块定义。
+                uses -= local
+    elif kind == 'import':
+        names.update(uses)
+    else:
+        named = _field(node, 'name')
+        if named is not None:
+            names.add(_text(named))
+        declarations = [_field(node, 'declarator') or _field(node, 'left')]
+        declarations.extend(_field(n, 'name') or _field(n, 'declarator') for n in _walk(node)
+                            if n.type == 'variable_declarator')
+        for decl in (item for item in declarations if item is not None):
+            # 声明名不包含初始化表达式中的被引用变量。
+            while _field(decl, 'declarator') is not None:
+                decl = _field(decl, 'declarator')
+            if decl.type in {'identifier', 'field_identifier'}:
+                names.add(_text(decl))
+    return names, uses - names
+
+
+def _link(source, target, relation, trigger, confirmed):
+    return {'owner': unit_reference(source), 'target': unit_reference(target), 'relation': relation,
+            'trigger': trigger, 'confirmed': confirmed,
+            'evidence': {'filePath': source['filePath'], 'startLine': source['startLine'],
+                         'endLine': source['endLine'], 'source': source['source']}}
+
+
+def _unit_evidence(units, syntax):
+    result = []
+    for owner in units:
+        for name in owner['uses']:
+            matches = [u for u in units if name in u['names'] and unit_identity(u) != unit_identity(owner)]
+            same_scope = [u for u in matches if u['filePath'] == owner['filePath'] and u['parent'] == owner['parent']]
+            same_file = [u for u in matches if u['filePath'] == owner['filePath'] and u['parent'] is None]
+            matches = same_scope or same_file or [u for u in matches if u['kind'] == 'fixture' and Path(u['filePath']).name == 'conftest.py']
+            for target in matches:
+                result.append(_link(owner, target, 'references', 'load' if owner['kind'] in {'import', 'global', 'container'} else 'call', len(matches) == 1))
+        if owner['kind'] == 'container':
+            for member in units:
+                if member['parent'] == unit_reference(owner) and member['kind'] == 'lifecycle':
+                    result.append(_link(owner, member, 'lifecycle', 'setup', True))
+    return result
+
+
+def required_units(analysis, cases):
+    """沿确认及候选关联闭包选择代码，保留作用域壳和必要加载语句。"""
+    selected = {unit_identity(row['unit']) for row in analysis['cases'] if row['case'] in cases}
+    by_key = {unit_identity(unit): unit for unit in analysis['units']}
+    changed = True
+    while changed:
+        previous = set(selected)
+        active_files = {key[0] for key in selected}
+        # conftest和非标准测试辅助模块保守保留，保持框架发现和模块初始化。
+        for unit in analysis['units']:
+            path = Path(unit['filePath'])
+            visible = path.name == 'conftest.py' and any(Path(f).parent.is_relative_to(path.parent) for f in active_files)
+            helper_file = path.name != 'conftest.py' and not any(
+                row['case']['filePath'] == unit['filePath'] for row in analysis['cases'])
+            framework_context = visible and (unit['kind'] in {'import', 'context'} or unit['eager'] or
+                                             any(name.startswith(('pytest_', '__')) for name in unit['names']))
+            # 导入与语言声明是文件加载所需上下文，Python导入会在渲染时按使用收敛。
+            active_scope = unit['filePath'] in active_files and (
+                unit['parent'] is None or unit_identity(unit['parent']) in selected)
+            metadata = {'pytestmark', 'pytest_plugins', 'collect_ignore', 'collect_ignore_glob', '__test__', '__all__'}
+            context = active_scope and (unit['kind'] in {'import', 'context'} or bool(metadata.intersection(unit['names'])))
+            if framework_context or helper_file or context or unit['eager'] and active_scope:
+                selected.add(unit_identity(unit))
+        for key in list(selected):
+            parent = by_key[key]['parent']
+            if parent is not None:
+                selected.add(unit_identity(parent))
+            unit = by_key[key]
+            if unit['kind'] == 'container':
+                has_tests = any(row['case']['filePath'] == unit['filePath'] and
+                                unit['startByte'] <= row['unit']['startByte'] < unit['endByte']
+                                for row in analysis['cases'])
+                for child in analysis['units']:
+                    if child['parent'] == unit_reference(unit) and (
+                            not has_tests or child['kind'] == 'lifecycle' or child['name'] in {'__init__', unit['name']}):
+                        selected.add(unit_identity(child))
+        for edge in analysis['evidence']:
+            if unit_identity(edge['owner']) in selected:
+                selected.add(unit_identity(edge['target']))
+        changed = selected != previous
+    return selected
+
+
+def render_units(analysis, selected):
+    """按原始作用域和声明顺序拼接所选单元，返回完整文件文本。"""
+    import ast
+    by_parent = {}
+    for unit in analysis['units']:
+        parent = unit['parent']
+        key = unit_identity(parent) if parent is not None else (unit['filePath'],)
+        by_parent.setdefault(key, []).append(unit)
+
+    def render(unit):
+        key = unit_identity(unit)
+        if unit['kind'] != 'container':
+            return unit['source']
+        children = by_parent.get(key, ())
+        body = ''.join(child['leading'] + render(child) for child in children if unit_identity(child) in selected)
+        if not body.strip() and analysis['language'] == 'Python':
+            body = 'pass'
+        return unit['header'] + body + unit['tail'] + unit['footer']
+
+    result = {}
+    for file, layout in analysis['layouts'].items():
+        units = by_parent.get((file,), ())
+        chosen = [u for u in units if unit_identity(u) in selected]
+        if not chosen:
+            continue
+        uses = set().union(*(set(u['uses']) for u in analysis['units']
+                                 if u['filePath'] == file and unit_identity(u) in selected and u['kind'] != 'import'))
+        future_uses = set().union(*(set(u['uses']) for u in analysis['units']
+                                   if u['filePath'] == file and unit_identity(u) not in selected and u['kind'] != 'import'))
+        fragments = []
+        for unit in chosen:
+            text = render(unit)
+            if analysis['language'] == 'Python' and unit['kind'] == 'import':
+                statement = ast.parse(text).body[0]
+                if isinstance(statement, ast.Import) or isinstance(statement, ast.ImportFrom) and statement.module != '__future__':
+                    aliases = []
+                    for alias in statement.names:
+                        binding = alias.asname or (alias.name.split('.')[0] if isinstance(statement, ast.Import) else alias.name)
+                        if alias.name == '*' or binding in uses or binding not in future_uses:
+                            aliases.append(alias)
+                    if not aliases:
+                        continue
+                    if len(aliases) != len(statement.names):
+                        statement.names = aliases
+                        text = ast.unparse(statement)
+                # 未被任何用例引用的导入可能负责注册插件，保留其原始语义。
+            fragments.append(unit['leading'] + text)
+        text = layout['leading'] + ''.join(fragments) + layout['trailing']
+        result[file] = text.removeprefix('\ufeff') if analysis['files'][file]['encoding'] == 'utf-8-sig' else text
+    return result
